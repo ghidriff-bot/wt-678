@@ -34,14 +34,6 @@ on:
           - macos-latest
           - self-hosted
           - macos-13
-      cleanup:
-        description: 'Run disk space cleanup before build?'
-        required: true
-        default: 'no'
-        type: choice
-        options:
-          - 'yes'
-          - 'no'
       force_new_diff:
         description: 'Force regeneration of the diff file if it already exists.'
         required: false
@@ -50,6 +42,15 @@ on:
         options:
           - 'yes'
           - 'no'
+      clobber_wf:
+        description: 'Clobber asset in wf-at56 release?'
+        required: false
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+
   workflow_call:
     inputs:
       osType:
@@ -67,9 +68,12 @@ on:
       runner:
         type: string
         required: true
-      cleanup:
+      force_new_diff:
         type: string
-        required: true
+        required: false
+      clobber_wf:
+        type: string
+        required: false
 
 jobs:
   build:
@@ -110,39 +114,6 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Free up disk space (Xcode‑safe, version‑aware)
-        if: ${{ steps.check_artifact.outputs.skip != 'true' && inputs.runner != 'self-hosted' && inputs.cleanup == 'yes' }}
-        shell: bash
-        run: |
-          echo "=== Disk space before cleanup ==="
-          df -h /
-          MACOS_VER=$(sw_vers -productVersion | cut -d. -f1,2)
-          echo "Detected macOS version: $MACOS_VER"
-          ACTIVE_XCODE=$(xcode-select -p | sed 's:/Contents/Developer::')
-          echo "Active Xcode: $ACTIVE_XCODE"
-          xcrun simctl delete all || true
-          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/*
-          for xc in /Applications/Xcode_*.app; do
-            [[ "$xc" != "$ACTIVE_XCODE" ]] && sudo rm -rf "$xc"
-          done
-          [ -d "$HOME/Library/Android" ] && sudo rm -rf "$HOME/Library/Android"
-          [ -d "/usr/local/share/dotnet" ] && sudo rm -rf /usr/local/share/dotnet
-          [ -d "$HOME/.ghcup" ] && sudo rm -rf "$HOME/.ghcup"
-          [ -d "$HOME/hostedtoolcache" ] && sudo rm -rf "$HOME/hostedtoolcache"
-          if [[ "$MACOS_VER" == "13."* ]]; then
-            [ -d "$HOME/Library/Python" ] && sudo rm -rf "$HOME/Library/Python"
-          fi
-          if [[ "$MACOS_VER" == "15."* ]]; then
-            [ -d "/opt/homebrew/Caskroom" ] && sudo rm -rf /opt/homebrew/Caskroom
-            brew cleanup -s || true
-          fi
-          brew cleanup -s || true
-          sudo rm -rf "$HOME/Library/Caches"/* || true
-          sudo rm -rf "$HOME/Library/Developer/Xcode/DerivedData"/* || true
-          sudo rm -rf "$HOME/Library/Developer/Xcode/Archives"/* || true
-          echo "=== Disk space after cleanup ==="
-          df -h /
-
       - name: Make script executable
         if: ${{ steps.check_artifact.outputs.skip != 'true' }}
         run: chmod +x scripts/ipsw-workflow.sh
@@ -168,15 +139,10 @@ jobs:
         id: zip_split
         run: |
           DIFF_PATH="${{ steps.generate_diff.outputs.diff_path }}"
-          # Artifact name is just the diff path with .json replaced by .zip
           ARTIFACT_NAME="${DIFF_PATH%.json}.zip"
-
           echo "📦 Zipping and splitting $DIFF_PATH into chunks ≤99MB..."
-          # Remove any old parts first
           rm -f "${ARTIFACT_NAME}" "${ARTIFACT_NAME}".z??
-
           zip -s 99m "$ARTIFACT_NAME" "$DIFF_PATH"
-
           echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
 
       - name: Commit split diff chunks
@@ -184,27 +150,17 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-
-          # Add all split parts (.zip, .z01, .z02, …)
           git add "${{ steps.zip_split.outputs.artifact_name }}"*
-
           OLD_BUILD=${{ steps.generate_diff.outputs.old_build }}
-
           if ! git diff --staged --quiet; then
             git commit -m "feat: add split diff archive for ${{ inputs.device }} from ${OLD_BUILD} to ${{ inputs.next_build }}"
-
-            # === TEMPORARILY MOVE LARGE IPSWs OUT ===
             IPSW_DIR="ipsw_diffs/IPSWs"
             TMP_IPSW_DIR="$RUNNER_TEMP/ipsw_stash_exclude"
             mkdir -p "$TMP_IPSW_DIR"
             if [ -d "$IPSW_DIR" ]; then
-              echo "🚚 Moving IPSWs out of tree before stash..."
               mv "$IPSW_DIR"/* "$TMP_IPSW_DIR"/ || true
             fi
-
-            echo "📦 Stashing all changes before pull --rebase..."
             git stash -u
-
             MAX_RETRIES=3
             RETRY_DELAY=5
             RETRIES=0
@@ -217,19 +173,13 @@ jobs:
               echo "⚠️ Push failed. Retrying in $RETRY_DELAY seconds... ($RETRIES/$MAX_RETRIES)"
               sleep "$RETRY_DELAY"
             done
-
-            echo "🔄 Restoring stashed changes..."
             git stash pop || echo "⚠️ Failed to apply stash. Manual intervention may be needed."
-
-            # === MOVE IPSWs BACK ===
             if [ -d "$TMP_IPSW_DIR" ]; then
-              echo "🚚 Restoring IPSWs..."
               mv "$TMP_IPSW_DIR"/* "$IPSW_DIR"/ || true
             fi
           else
             echo "No new diff chunks to commit."
           fi
-
 
       - name: Run diff script
         if: ${{ steps.check_artifact.outputs.skip != 'true' }}
@@ -241,13 +191,6 @@ jobs:
             "${{ inputs.prev_build }}" \
             "${{ inputs.next_build }}"
 
-      # - name: Upload zipped artifact
-      #   if: ${{ steps.check_artifact.outputs.skip != 'true' && steps.diff_script.outputs.artifact_path != '' }}
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: ${{ steps.diff_script.outputs.artifact_name }}
-      #     path: ${{ steps.diff_script.outputs.artifact_name }}.z*
-
       - name: Create Release and Upload Asset
         if: ${{ steps.check_artifact.outputs.skip != 'true' && steps.diff_script.outputs.artifact_path != '' }}
         uses: softprops/action-gh-release@v2
@@ -255,6 +198,17 @@ jobs:
           tag_name: ${{ inputs.device }}
           name: ${{ inputs.device }}
           files: ${{ steps.diff_script.outputs.artifact_name }}.z*
+
+      - name: Upload asset to wf-at56 release (clobber only asset)
+        if: ${{ steps.check_artifact.outputs.skip != 'true' && steps.diff_script.outputs.artifact_path != '' && inputs.clobber_wf == 'yes' }}
+        env:
+          GH_TOKEN: ${{ secrets.REL_PAT }}
+        run: |
+          TAG="${{ inputs.device }}"
+          REPO="clearbluejar/wf-at56"
+          ASSET="${{ steps.diff_script.outputs.artifact_name }}"
+          echo "📦 Uploading asset to existing release (clobber only asset)..."
+          gh release upload "$TAG" "$ASSET".z* --repo "$REPO" --clobber
 
       - name: Backup upload of all zips in workspace
         if: failure()
