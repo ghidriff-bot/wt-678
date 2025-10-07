@@ -1,0 +1,100 @@
+name: D W Ub
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      osType:
+        description: 'OS Type'
+        required: true
+        default: 'iOS'
+        type: string
+      device:
+        description: 'Device'
+        required: true
+        default: 'iPhone12,1'
+        type: string
+      prev_build:
+        description: Previous build
+        type: string
+        required: false
+      next_build:
+        description: Next build
+        required: true
+        default: '22G90'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free Disk Space Before Build
+        run: |
+          echo "Disk space before cleanup:"
+          df -h
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/lib/android/sdk/ndk
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo apt-get clean
+          echo "Disk space after cleanup:"
+          df -h
+
+      - name: Load FUSE kernel module
+        run: |
+          sudo modprobe fuse
+          ls -l /dev/fuse || true
+
+      - name: Pull blacktop/ipsw Docker image
+        run: docker pull blacktop/ipsw
+
+      - name: Make script executable
+        run: chmod +x scripts/ipsw-workflow.sh
+
+      - name: Run diff script inside Docker container with FUSE access
+        run: |
+          docker run --rm \
+            --cap-add SYS_ADMIN \
+            --device /dev/fuse \
+            --security-opt apparmor:unconfined \
+            --entrypoint bash \
+            -v "${PWD}:/data" \
+            blacktop/ipsw \
+            -c "cd /data && scripts/ipsw-workflow.sh \
+              '${{ inputs.osType }}' \
+              '${{ inputs.device }}' \
+              '${{ inputs.prev_build }}' \
+              '${{ inputs.next_build }}'"
+
+      - name: Prepare artifact name
+        id: vars
+        run: |
+          SAFE_DEVICE="${{ inputs.device }}"
+          SAFE_DEVICE="${SAFE_DEVICE//,/_}"
+          echo "safe_device=$SAFE_DEVICE" >> $GITHUB_OUTPUT
+          echo "artifact_name=diff-${SAFE_DEVICE}-${{ inputs.prev_build }}-${{ inputs.next_build }}" >> $GITHUB_OUTPUT
+
+      - name: Create zip of selected outputs
+        run: |
+          SAFE_DEVICE="${{ inputs.device }}"
+          SAFE_DEVICE="${SAFE_DEVICE//,/}"
+          RUN_DIR="ipsw_diffs/${SAFE_DEVICE}/${{ inputs.prev_build }}-${{ inputs.next_build }}"
+
+          cd "$RUN_DIR"
+          zip -r "../../../${{ steps.vars.outputs.artifact_name }}.zip" \
+            diffs \
+            metadata \
+            changed \
+            *.txt
+
+      - name: Upload zipped artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vars.outputs.artifact_name }}
+          path: ${{ steps.vars.outputs.artifact_name }}.zip

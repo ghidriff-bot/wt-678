@@ -1,0 +1,85 @@
+name: IPSW Multi-Build Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Device identifier (e.g. Mac14,3)"
+        required: true
+        default: "iPhone13,3"
+      os_type:
+        description: "OS type (macOS or iOS)"
+        required: true
+        default: "iOS"
+      limit:
+        description: "Number of latest builds to process"
+        required: false
+        default: "3"
+      runner:
+        description: 'Runner type'
+        required: true
+        default: 'macos-13'
+        type: choice
+        options:
+          - macos-latest
+          - self-hosted
+          - macos-13
+      cleanup:
+        description: 'Run disk space cleanup before build?'
+        required: true
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+
+jobs:
+  get-builds:
+    runs-on: macos-latest
+    outputs:
+      builds_b64: ${{ steps.encode.outputs.builds_b64 }}
+    steps:
+      - name: Install ipsw + jq
+        run: brew install blacktop/tap/ipsw jq
+
+      - name: Fetch latest build numbers (from URLs)
+        id: encode
+        run: |
+          DEVICE="${{ github.event.inputs.device }}"
+          LIMIT="${{ github.event.inputs.limit }}"
+          builds=$(ipsw dl ipsw --device "$DEVICE" --urls \
+            | sed -r 's/\x1B\[[0-9;]*[mGKH]//g' \
+            | awk -F_ '{print $3}' \
+            | head -n "$LIMIT" \
+            | jq -R . | jq -s .)
+          encoded=$(echo "$builds" | base64 | tr -d '\n')
+          echo "builds_b64=$encoded" >> "$GITHUB_OUTPUT"
+
+  decode-builds:
+    needs: get-builds
+    runs-on: ubuntu-latest
+    outputs:
+      builds: ${{ steps.decode.outputs.builds }}
+    steps:
+      - name: Decode base64 JSON to plain string
+        id: decode
+        run: |
+          decoded=$(echo "${{ needs.get-builds.outputs.builds_b64 }}" | base64 --decode)
+          # Escape % and newlines for GITHUB_OUTPUT
+          safe=$(echo "$decoded" | jq -c .)
+          echo "builds=$safe" >> "$GITHUB_OUTPUT"
+
+  run-diff-matrix:
+    needs: decode-builds
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJson(needs.decode-builds.outputs.builds) }}
+    uses: ./.github/workflows/d.yml
+    with:
+      osType: ${{ github.event.inputs.os_type }}
+      device: ${{ github.event.inputs.device }}
+      prev_build: ""
+      next_build: ${{ matrix.build }}
+      runner: ${{ github.event.inputs.runner }}
+      cleanup: ${{ github.event.inputs.cleanup }}

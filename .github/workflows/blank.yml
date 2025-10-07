@@ -1,0 +1,90 @@
+# This is a basic workflow to help you get started with Actions
+
+name: Diff
+
+permissions:
+  contents: write
+
+# Controls when the workflow will run
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      osType:
+        description: 'OS Type'
+        required: true
+        default: 'macOS'
+        type: choice
+        options:
+        - macOS
+        - iOS
+      device:
+        description: 'Device'
+        required: true
+        default: 'Mac14,3'
+        type: choice
+        options:
+        - Mac14,3
+        - iPhone16,2
+      prev_build:
+        description: Previous build
+        type: string
+        required: true
+      next_build:
+        description: Next build
+        type: string
+        required: true
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: macos-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+
+      # Free up disk space as the macOS runners end up using most for Xcode
+      # versions we don't need and iOS simulators.
+      - name: Free up disk space
+        # if:  matrix.runner == 'macos-latest' 
+        run: |
+          df -h
+          echo '*** Delete iOS simulators'
+          xcrun simctl delete all
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/*
+          df -h
+      
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+
+      # Runs a diff
+      - name: Download `ipsw`
+        run: |
+          brew install blacktop/tap/ipsw
+
+      # Runs a diff
+      - name: Download IPSWs
+        run: |
+          mkdir /tmp/IPSW1 /tmp/IPSW2
+          ipsw dl appledb --os ${{ inputs.osType }} --device '${{ inputs.device }}' --build '${{ inputs.prev_build }}' --output /tmp/IPSW1 --confirm
+          ipsw dl appledb --os ${{ inputs.osType }} --device '${{ inputs.device }}' --build '${{ inputs.next_build }}' --output /tmp/IPSW2 --confirm
+          df -h
+          
+      - name: Create Diff
+        run: | 
+          df -h
+          ipsw diff -V --output . \
+                       --json \
+                       /tmp/IPSW1/*.ipsw \
+                       /tmp/IPSW2/*.ipsw
+          git config --global user.name 'clearbluejar'
+          git config --global user.email '3752074+clearbluejar@users.noreply.github.com'
+          git add -A *.json
+          git commit -am "Automated Diff of ${{ inputs.osType }} ${{ inputs.prev_build }} -> ${{ inputs.next_build }}"
+          git push

@@ -1,0 +1,264 @@
+name: D W
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      osType:
+        description: 'OS Type'
+        required: true
+        default: 'iOS'
+        type: string
+      device:
+        description: 'Device'
+        required: true
+        default: 'iPhone12,1'
+        type: string
+      prev_build:
+        description: Previous build
+        type: string
+        required: false
+      next_build:
+        description: Next build
+        type: string
+        required: true
+        default: '22G90'
+      runner:
+        description: 'Runner type'
+        required: true
+        default: 'macos-13'
+        type: choice
+        options:
+          - macos-latest
+          - self-hosted
+          - macos-13
+      cleanup:
+        description: 'Run disk space cleanup before build?'
+        required: true
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+      force_new_diff:
+        description: 'Force regeneration of the diff file if it already exists.'
+        required: false
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+  workflow_call:
+    inputs:
+      osType:
+        type: string
+        required: true
+      device:
+        type: string
+        required: true
+      prev_build:
+        type: string
+        required: false
+      next_build:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+      cleanup:
+        type: string
+        required: true
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for existing artifact in release
+        id: check_artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! command -v jq >/dev/null; then
+            echo "jq not found, installing..."
+            brew install jq
+          fi
+          SAFE_DEVICE=$(echo "${{ inputs.device }}" | tr ',' '_')
+          PATTERN="^diff-${SAFE_DEVICE}-.*-${{ inputs.next_build }}\\.zip$"
+          if ! gh release view "${{ inputs.device }}" >/dev/null 2>&1; then
+            echo "Release ${{ inputs.device }} does not exist. Proceeding."
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "Checking for existing artifacts in release ${{ inputs.device }}..."
+          ASSET_LIST=$(gh release view "${{ inputs.device }}" --json assets | jq -r '.assets[].name')
+          if [ -z "$ASSET_LIST" ]; then
+            echo "No assets found in release. Proceeding."
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "Found assets:"
+          echo "$ASSET_LIST"
+          if echo "$ASSET_LIST" | grep -qE "$PATTERN"; then
+            echo "Found artifact matching pattern '$PATTERN' in release ${{ inputs.device }}. Skipping workflow."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "Artifact not found for pattern '$PATTERN'. Proceeding with workflow."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Free up disk space (Xcode‑safe, version‑aware)
+        if: ${{ steps.check_artifact.outputs.skip != 'true' && inputs.runner != 'self-hosted' && inputs.cleanup == 'yes' }}
+        shell: bash
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h /
+          MACOS_VER=$(sw_vers -productVersion | cut -d. -f1,2)
+          echo "Detected macOS version: $MACOS_VER"
+          ACTIVE_XCODE=$(xcode-select -p | sed 's:/Contents/Developer::')
+          echo "Active Xcode: $ACTIVE_XCODE"
+          xcrun simctl delete all || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/*
+          for xc in /Applications/Xcode_*.app; do
+            [[ "$xc" != "$ACTIVE_XCODE" ]] && sudo rm -rf "$xc"
+          done
+          [ -d "$HOME/Library/Android" ] && sudo rm -rf "$HOME/Library/Android"
+          [ -d "/usr/local/share/dotnet" ] && sudo rm -rf /usr/local/share/dotnet
+          [ -d "$HOME/.ghcup" ] && sudo rm -rf "$HOME/.ghcup"
+          [ -d "$HOME/hostedtoolcache" ] && sudo rm -rf "$HOME/hostedtoolcache"
+          if [[ "$MACOS_VER" == "13."* ]]; then
+            [ -d "$HOME/Library/Python" ] && sudo rm -rf "$HOME/Library/Python"
+          fi
+          if [[ "$MACOS_VER" == "15."* ]]; then
+            [ -d "/opt/homebrew/Caskroom" ] && sudo rm -rf /opt/homebrew/Caskroom
+            brew cleanup -s || true
+          fi
+          brew cleanup -s || true
+          sudo rm -rf "$HOME/Library/Caches"/* || true
+          sudo rm -rf "$HOME/Library/Developer/Xcode/DerivedData"/* || true
+          sudo rm -rf "$HOME/Library/Developer/Xcode/Archives"/* || true
+          echo "=== Disk space after cleanup ==="
+          df -h /
+
+      - name: Make script executable
+        if: ${{ steps.check_artifact.outputs.skip != 'true' }}
+        run: chmod +x scripts/ipsw-workflow.sh
+
+      - name: Generate diff
+        if: ${{ steps.check_artifact.outputs.skip != 'true' }}
+        id: generate_diff
+        run: |
+          FORCE_FLAG=0
+          if [ "${{ inputs.force_new_diff }}" == "yes" ]; then
+            FORCE_FLAG=1
+          fi
+          ./scripts/ipsw-workflow.sh \
+            "${{ inputs.osType }}" \
+            "${{ inputs.device }}" \
+            "${{ inputs.prev_build }}" \
+            "${{ inputs.next_build }}" \
+            "1" \
+            "$FORCE_FLAG"
+
+      - name: Zip and split diff
+        if: ${{ steps.check_artifact.outputs.skip != 'true' && steps.generate_diff.outputs.diff_path != '' }}
+        id: zip_split
+        run: |
+          DIFF_PATH="${{ steps.generate_diff.outputs.diff_path }}"
+          # Artifact name is just the diff path with .json replaced by .zip
+          ARTIFACT_NAME="${DIFF_PATH%.json}.zip"
+
+          echo "📦 Zipping and splitting $DIFF_PATH into chunks ≤99MB..."
+          # Remove any old parts first
+          rm -f "${ARTIFACT_NAME}" "${ARTIFACT_NAME}".z??
+
+          zip -s 99m "$ARTIFACT_NAME" "$DIFF_PATH"
+
+          echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
+
+      - name: Commit split diff chunks
+        if: ${{ steps.check_artifact.outputs.skip != 'true' && steps.zip_split.outputs.artifact_name != '' }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          # Add all split parts (.zip, .z01, .z02, …)
+          git add "${{ steps.zip_split.outputs.artifact_name }}"*
+
+          OLD_BUILD=${{ steps.generate_diff.outputs.old_build }}
+
+          if ! git diff --staged --quiet; then
+            git commit -m "feat: add split diff archive for ${{ inputs.device }} from ${OLD_BUILD} to ${{ inputs.next_build }}"
+
+            # === TEMPORARILY MOVE LARGE IPSWs OUT ===
+            IPSW_DIR="ipsw_diffs/IPSWs"
+            TMP_IPSW_DIR="$RUNNER_TEMP/ipsw_stash_exclude"
+            mkdir -p "$TMP_IPSW_DIR"
+            if [ -d "$IPSW_DIR" ]; then
+              echo "🚚 Moving IPSWs out of tree before stash..."
+              mv "$IPSW_DIR"/* "$TMP_IPSW_DIR"/ || true
+            fi
+
+            echo "📦 Stashing all changes before pull --rebase..."
+            git stash -u
+
+            MAX_RETRIES=3
+            RETRY_DELAY=5
+            RETRIES=0
+            until git pull --rebase origin main && git push; do
+              RETRIES=$((RETRIES + 1))
+              if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+                echo "❌ Push failed after $MAX_RETRIES attempts."
+                exit 1
+              fi
+              echo "⚠️ Push failed. Retrying in $RETRY_DELAY seconds... ($RETRIES/$MAX_RETRIES)"
+              sleep "$RETRY_DELAY"
+            done
+
+            echo "🔄 Restoring stashed changes..."
+            git stash pop || echo "⚠️ Failed to apply stash. Manual intervention may be needed."
+
+            # === MOVE IPSWs BACK ===
+            if [ -d "$TMP_IPSW_DIR" ]; then
+              echo "🚚 Restoring IPSWs..."
+              mv "$TMP_IPSW_DIR"/* "$IPSW_DIR"/ || true
+            fi
+          else
+            echo "No new diff chunks to commit."
+          fi
+
+
+      - name: Run diff script
+        if: ${{ steps.check_artifact.outputs.skip != 'true' }}
+        id: diff_script
+        run: |
+          scripts/ipsw-workflow.sh \
+            "${{ inputs.osType }}" \
+            "${{ inputs.device }}" \
+            "${{ inputs.prev_build }}" \
+            "${{ inputs.next_build }}"
+
+      # - name: Upload zipped artifact
+      #   if: ${{ steps.check_artifact.outputs.skip != 'true' && steps.diff_script.outputs.artifact_path != '' }}
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ${{ steps.diff_script.outputs.artifact_name }}
+      #     path: ${{ steps.diff_script.outputs.artifact_name }}.z*
+
+      - name: Create Release and Upload Asset
+        if: ${{ steps.check_artifact.outputs.skip != 'true' && steps.diff_script.outputs.artifact_path != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.device }}
+          name: ${{ inputs.device }}
+          files: ${{ steps.diff_script.outputs.artifact_name }}.z*
+
+      - name: Backup upload of all zips in workspace
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-zips
+          path: '*.zip'

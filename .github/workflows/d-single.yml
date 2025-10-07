@@ -1,0 +1,117 @@
+name: IPSW Diff Single
+
+on:
+  workflow_call:
+    inputs:
+      os_type:
+        required: true
+        type: string
+      device:
+        required: true
+        type: string
+      old_build:
+        required: true
+        type: string
+      new_build:
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  diff-and-analyze:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # so we can commit back
+
+      - name: Install tools
+        run: brew install blacktop/tap/ipsw jq unzip curl
+
+      - name: Define paths
+        run: |
+          SAFE_DEVICE=$(echo "${{ inputs.device }}" | tr ',' '_')
+          echo "SAFE_DEVICE=$SAFE_DEVICE" >> $GITHUB_ENV
+          DIFF_FILE="diff-history/${SAFE_DEVICE}-${{ inputs.old_build }}-${{ inputs.new_build }}.json"
+          META_FILE="diff-history/${SAFE_DEVICE}-${{ inputs.old_build }}-${{ inputs.new_build }}.metadata.txt"
+          echo "DIFF_FILE=$DIFF_FILE" >> $GITHUB_ENV
+          echo "META_FILE=$META_FILE" >> $GITHUB_ENV
+
+      - name: Check if files exist
+        id: check-files
+        run: |
+          [ -f "$DIFF_FILE" ] && echo "diff_exists=true" >> $GITHUB_OUTPUT || echo "diff_exists=false" >> $GITHUB_OUTPUT
+          [ -f "$META_FILE" ] && echo "meta_exists=true" >> $GITHUB_OUTPUT || echo "meta_exists=false" >> $GITHUB_OUTPUT
+
+      - name: Download OLD IPSW
+        if: steps.check-files.outputs.diff_exists == 'false'
+        run: |
+          mkdir -p IPSW_OLD
+          ipsw dl appledb --os "${{ inputs.os_type }}" \
+            --device "${{ inputs.device }}" \
+            --build "${{ inputs.old_build }}" \
+            --output IPSW_OLD --confirm
+
+      - name: Download NEW IPSW
+        if: steps.check-files.outputs.diff_exists == 'false'
+        run: |
+          mkdir -p IPSW_NEW
+          ipsw dl appledb --os "${{ inputs.os_type }}" \
+            --device "${{ inputs.device }}" \
+            --build "${{ inputs.new_build }}" \
+            --output IPSW_NEW --confirm
+
+      - name: Locate IPSWs
+        if: steps.check-files.outputs.diff_exists == 'false' || steps.check-files.outputs.meta_exists == 'false'
+        run: |
+          OLD_IPSW=$(find IPSW_OLD -type f -name "*_Restore.ipsw" ! -name "._*" | head -n1)
+          NEW_IPSW=$(find IPSW_NEW -type f -name "*_Restore.ipsw" ! -name "._*" | head -n1)
+          echo "OLD_IPSW=$OLD_IPSW" >> $GITHUB_ENV
+          echo "NEW_IPSW=$NEW_IPSW" >> $GITHUB_ENV
+
+      - name: Run diff
+        if: steps.check-files.outputs.diff_exists == 'false'
+        run: |
+          mkdir -p diff-history
+          ipsw diff "$OLD_IPSW" "$NEW_IPSW" --json --output diff-history --title "Diff"
+          mv "$(find diff-history -name '*.json' | head -n1)" "$DIFF_FILE"
+
+      - name: Generate metadata
+        if: steps.check-files.outputs.meta_exists == 'false'
+        run: |
+          mkdir -p diff-history
+          get_link() {
+            local ipsw_file="$1"
+            local label="$2"
+            local build="$3"
+            plist_data=$(unzip -p "$ipsw_file" BuildManifest.plist | plutil -extract "BuildIdentities.0.Info" xml1 -o - - 2>/dev/null || true)
+            product_version=$(echo "$plist_data" | plutil -p - | grep ProductVersion | head -n1 | awk -F'"' '{print $4}')
+            build_version=$(echo "$plist_data" | plutil -p - | grep ProductBuildVersion | head -n1 | awk -F'"' '{print $4}')
+            url_cdn=$(ipsw dl appledb --os "${{ inputs.os_type }}" --device "${{ inputs.device }}" --build "$build" --urls)
+            {
+              echo "$label ProductVersion: $product_version"
+              echo "$label ProductBuildVersion: $build_version"
+              echo "$label CDN URL: $url_cdn"
+            } >> "$META_FILE"
+            match=$(curl -s "https://support.apple.com/en-us/100100" | grep -iA1 "$product_version" | head -n2)
+            if [ -n "$match" ]; then
+              title=$(echo "$match" | head -n1 | sed -E 's/.*>([^<]+)<.*/\1/')
+              sec_url=$(echo "$match" | grep -Eo 'href="[^"]+"' | head -n1 | cut -d'"' -f2)
+              [[ "$sec_url" != http* ]] && sec_url="https://support.apple.com${sec_url}"
+              echo "$label Security Update Title: $title" >> "$META_FILE"
+              echo "$label Security Update URL: $sec_url" >> "$META_FILE"
+            fi
+          }
+          get_link "$OLD_IPSW" "OLD" "${{ inputs.old_build }}"
+          get_link "$NEW_IPSW" "NEW" "${{ inputs.new_build }}"
+
+      - name: Commit and push files
+        if: steps.check-files.outputs.diff_exists == 'false' || steps.check-files.outputs.meta_exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git add "$DIFF_FILE" "$META_FILE"
+          git commit -m "Add/Update diff + metadata for ${{ env.SAFE_DEVICE }} ${{ inputs.old_build }} → ${{ inputs.new_build }}" || echo "No changes to commit"
+          git push
