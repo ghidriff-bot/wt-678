@@ -14,7 +14,7 @@ on:
       device:
         description: 'Device'
         required: true
-        default: 'iPhone12,1'
+        default: 'iPhone13,3'
         type: string
       prev_build:
         description: Previous build
@@ -28,12 +28,13 @@ on:
       runner:
         description: 'Runner type'
         required: true
-        default: 'macos-13'
+        default: 'macos-15-intel'
         type: choice
         options:
           - macos-latest
           - self-hosted
           - macos-13
+          - macos-15-intel
       force_new_diff:
         description: 'Force regeneration of the diff file if it already exists.'
         required: false
