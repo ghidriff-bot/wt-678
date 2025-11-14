@@ -46,7 +46,7 @@ on:
       clobber_wf:
         description: 'Clobber asset in wf-at56 release?'
         required: false
-        default: 'no'
+        default: 'yes'
         type: choice
         options:
           - 'yes'
