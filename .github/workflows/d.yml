@@ -165,7 +165,7 @@ jobs:
             MAX_RETRIES=3
             RETRY_DELAY=5
             RETRIES=0
-            until git pull --rebase origin main && git push; do
+            until git pull --strategy=ours origin main && git push; do
               RETRIES=$((RETRIES + 1))
               if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
                 echo "❌ Push failed after $MAX_RETRIES attempts."
