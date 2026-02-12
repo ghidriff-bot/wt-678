@@ -82,6 +82,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free Disk Space (macOS)
+        run: |
+          echo "Before cleanup:"
+          df -h
+      
+          # Remove Xcode device support + simulators
+          rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport/* || true
+          rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          rm -rf ~/Library/Developer/CoreSimulator/Devices/* || true
+      
+          # Remove DerivedData
+          rm -rf ~/Library/Developer/Xcode/DerivedData/* || true
+      
+          # Homebrew cleanup
+          brew cleanup -s || true
+          rm -rf "$(brew --cache)" || true
+      
+          echo "After cleanup:"
+          df -h
+
+
       - name: Check for existing artifact in release
         id: check_artifact
         env:
