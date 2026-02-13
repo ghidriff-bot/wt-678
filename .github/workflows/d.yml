@@ -51,6 +51,11 @@ on:
         options:
           - 'yes'
           - 'no'
+      free_disk_space:
+        description: 'Free disk space by removing Xcode and Homebrew caches'
+        required: false
+        default: false
+        type: boolean
 
   workflow_call:
     inputs:
@@ -75,6 +80,10 @@ on:
       clobber_wf:
         type: string
         required: false
+      free_disk_space:
+        type: boolean
+        required: false
+        default: true
 
 jobs:
   build:
@@ -83,6 +92,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Free Disk Space (macOS)
+        if: ${{ inputs.free_disk_space == true }}
         run: |
           echo "Before cleanup:"
           df -h
