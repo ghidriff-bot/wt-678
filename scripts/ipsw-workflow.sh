@@ -315,13 +315,23 @@ extract_all() {
 
 
 
-extract_all old "$OLD_IPSW"
-extract_all new "$NEW_IPSW"
-
-# 3.5 Extract KEXTs from kernelcache if needed
-if [ -s "$WORKDIR/kexts.txt" ]; then
-  echo "[*] Extracting KEXTs from kernelcache..."
-  for side in old new; do
+# 3.5-6. Process each side sequentially to minimize disk usage
+# This function extracts and processes one IPSW side at a time
+process_side() {
+  local side="$1"
+  local ipsw_file="$2"
+  
+  echo ""
+  echo "=========================================="
+  echo "[*] Processing $side IPSW: $(basename "$ipsw_file")"
+  echo "=========================================="
+  
+  # Extract IPSW
+  extract_all "$side" "$ipsw_file"
+  
+  # Extract KEXTs from kernelcache if needed
+  if [ -s "$WORKDIR/kexts.txt" ]; then
+    echo "[*] Extracting KEXTs from kernelcache for $side..."
     for arch in arm64e x86_64; do
       KC_DIR="$WORKDIR/extracted_full/$side/$arch"
       KC=$(find "$KC_DIR" -maxdepth 2 -name 'kernelcache.release.*' -print -quit)
@@ -341,29 +351,23 @@ if [ -s "$WORKDIR/kexts.txt" ]; then
         exit 1
       fi
     done
-  done
-fi
+  fi
 
-
-# 4. KEXTs: copy from extracted kernelcache output if changed
-if [ -s "$WORKDIR/kexts.txt" ]; then
-  echo "[*] Copying $(wc -l < "$WORKDIR/kexts.txt") changed KEXTs..."
-  while read -r kext; do
-    [ -n "$kext" ] || continue
-    for side in old new; do
+  # Copy changed KEXTs for this side
+  if [ -s "$WORKDIR/kexts.txt" ]; then
+    echo "[*] Copying changed KEXTs for $side..."
+    while read -r kext; do
+      [ -n "$kext" ] || continue
       src=$(find "$WORKDIR/extracted_full/$side" -type f -path "*/kernelcache_kexts/$kext" -print -quit)
       if [ -f "$src" ]; then
         mkdir -p "$WORKDIR/changed/$side/kexts/$(dirname "$kext")"
         cp "$src" "$WORKDIR/changed/$side/kexts/$kext"
       fi
-    done
-  done < "$WORKDIR/kexts.txt"
-fi
+    done < "$WORKDIR/kexts.txt"
+  fi
 
-
-# 5. DYLDs: split once, then copy changed dylibs
-if [ -s "$WORKDIR/dylibs.txt" ]; then
-  for side in old new; do
+  # Process dyld_shared_cache for this side
+  if [ -s "$WORKDIR/dylibs.txt" ]; then
     echo "[*] Processing dyld_shared_cache for $side..."
     for arch in arm64e x86_64; do
       echo "  [*] Processing $arch..."
@@ -401,13 +405,44 @@ if [ -s "$WORKDIR/dylibs.txt" ]; then
             cp "$src" "$DEST_DIR/$(basename "$dylib")"
           fi
         done < "$WORKDIR/dylibs.txt"
+        
+        # Cleanup: Remove split dylibs to free disk space
+        echo "    → Cleaning up split dylibs for $side/$arch..."
+        rm -rf "$SPLIT_DIR"
       fi
     done
-  done
-fi
+  fi
 
+  # Copy changed MACHOs for this side
+  if [ -s "$WORKDIR/machos.txt" ]; then
+    echo "[*] Copying changed MACHOs for $side..."
+    while read -r macho; do
+      [ -n "$macho" ] || continue
+      found=0
 
-# 6. MACHOs: copy directly from the batch-extracted filesystem (arch-aware)
+      for arch in arm64e x86_64; do
+        src=$(resolve_macho_path "$side" "$arch" "$macho") || continue
+
+        dest="$WORKDIR/changed/$side/machos/$arch/$macho"
+        mkdir -p "$(dirname "$dest")"
+        cp "$src" "$dest"
+        echo "$side:$arch:$macho -> $src" >> "$WORKDIR/metadata/macho_copy_map.txt"
+        found=1
+        break
+      done
+
+      [ "$found" -eq 0 ] && echo "[WARN] $macho not found for $side in any arch dir"
+    done < "$WORKDIR/machos.txt"
+  fi
+  
+  # Cleanup: Remove extracted_full for this side to free disk space
+  echo ""
+  echo "[*] Cleaning up extracted files for $side to free disk space..."
+  rm -rf "$WORKDIR/extracted_full/$side"
+  echo "[*] $side processing complete."
+}
+
+# MACHO path resolution helper
 resolve_macho_path() {
   local side="$1" arch="$2" macho="$3"
   local src="" try="" build_dir=""
@@ -435,28 +470,9 @@ resolve_macho_path() {
   return 1
 }
 
-if [ -s "$WORKDIR/machos.txt" ]; then
-  echo "[*] Copying $(wc -l < "$WORKDIR/machos.txt") changed MACHOs..."
-  for side in old new; do
-    while read -r macho; do
-      [ -n "$macho" ] || continue
-      found=0
-
-      for arch in arm64e x86_64; do
-        src=$(resolve_macho_path "$side" "$arch" "$macho") || continue
-
-        dest="$WORKDIR/changed/$side/machos/$arch/$macho"
-        mkdir -p "$(dirname "$dest")"
-        cp "$src" "$dest"
-        echo "$side:$arch:$macho -> $src" >> "$WORKDIR/metadata/macho_copy_map.txt"
-        found=1
-        break
-      done
-
-      [ "$found" -eq 0 ] && echo "[WARN] $macho not found for $side in any arch dir"
-    done < "$WORKDIR/machos.txt"
-  done
-fi
+# Process old IPSW first, then new
+process_side "old" "$OLD_IPSW"
+process_side "new" "$NEW_IPSW"
 
 
 
