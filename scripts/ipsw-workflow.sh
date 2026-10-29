@@ -379,6 +379,23 @@ process_side() {
   # in a flat extract. So batch into a staging dir and move results back under
   # their real cache path. Also batches ~200 dylibs per call (2x faster, reuses
   # symbol cache) grouped by basename-occurrence to avoid collisions.
+  #
+  # The move back MUST use the dylib's full cache path, not its basename:
+  # mkdir'ing the tree and then writing to "$DEST_DIR/$base" re-flattens the
+  # output and the empty-dir sweep below erases the evidence. Measured on
+  # iPhone13,3 24A446->24B119: 2232 files archived for 2276 changed dylibs,
+  # 44 lost across 43 colliding basenames. The full install path is also the
+  # key downstream consumers join on, so flattening breaks them twice.
+  #
+  # `--objc` is cheap (~1.6KB/dylib) and worth it. `--stubs` is NOT: it adds a
+  # ~51MB floor to every dylib (libobjc.A.dylib 3.5MB -> 135MB) because each
+  # one gets a copy of the cache-wide stub island symbol table. Measured on
+  # CoreFoundation from one DSC, with vs without: 11MB -> 62MB and symtab
+  # 15,615 -> 932,285 entries, for identical function-name coverage (7865
+  # function starts, 7844 named, 99.7% either way). The extra ~917k symbols are
+  # cache-wide stub island names, not names for this binary. It buys nothing,
+  # cost a 174GB workdir here, and makes symbol counts incomparable across
+  # builds, so it stays off.
   if [ -s "$WORKDIR/dylibs.txt" ]; then
     echo "[*] Processing dyld_shared_cache for $side..."
     for arch in arm64e x86_64; do
@@ -427,7 +444,7 @@ process_side() {
               mkdir -p "$STAGE"
 
               tr '\n' '\0' < "$TMP/batch" \
-                | xargs -0 ipsw dyld extract "$DSC" --objc --stubs --output "$STAGE" \
+                | xargs -0 ipsw dyld extract "$DSC" --objc --output "$STAGE" \
                 >/dev/null 2>&1 || true
 
               # Move results back under real cache path
@@ -435,12 +452,12 @@ process_side() {
                 [ -n "$dylib" ] || continue
                 base="$(basename "$dylib")"
                 if [ ! -f "$STAGE/$base" ]; then
-                  ipsw dyld extract "$DSC" "$dylib" --objc --stubs --output "$STAGE" \
+                  ipsw dyld extract "$DSC" "$dylib" --objc --output "$STAGE" \
                     >/dev/null 2>&1 || true
                 fi
                 if [ -f "$STAGE/$base" ]; then
                   mkdir -p "$DEST_DIR/$(dirname "$dylib")"
-                  mv -f "$STAGE/$base" "$DEST_DIR/$base"
+                  mv -f "$STAGE/$base" "$DEST_DIR/$dylib"
                 else
                   echo "    [WARN] Failed to extract $dylib"
                 fi
@@ -459,19 +476,19 @@ process_side() {
             mkdir -p "$STAGE"
 
             tr '\n' '\0' < "$TMP/batch" \
-              | xargs -0 ipsw dyld extract "$DSC" --objc --stubs --output "$STAGE" \
+              | xargs -0 ipsw dyld extract "$DSC" --objc --output "$STAGE" \
               >/dev/null 2>&1 || true
 
             while read -r dylib; do
               [ -n "$dylib" ] || continue
               base="$(basename "$dylib")"
               if [ ! -f "$STAGE/$base" ]; then
-                ipsw dyld extract "$DSC" "$dylib" --objc --stubs --output "$STAGE" \
+                ipsw dyld extract "$DSC" "$dylib" --objc --output "$STAGE" \
                   >/dev/null 2>&1 || true
               fi
               if [ -f "$STAGE/$base" ]; then
                 mkdir -p "$DEST_DIR/$(dirname "$dylib")"
-                mv -f "$STAGE/$base" "$DEST_DIR/$base"
+                mv -f "$STAGE/$base" "$DEST_DIR/$dylib"
               else
                 echo "    [WARN] Failed to extract $dylib"
               fi
