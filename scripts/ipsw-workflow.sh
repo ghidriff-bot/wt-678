@@ -374,6 +374,11 @@ process_side() {
   fi
 
   # Process dyld_shared_cache for this side
+  # `ipsw dyld extract` writes every dylib FLAT into --output by basename only.
+  # 166 of Mac14,12's 3452 changed dylibs share a basename, silently overwriting
+  # in a flat extract. So batch into a staging dir and move results back under
+  # their real cache path. Also batches ~200 dylibs per call (2x faster, reuses
+  # symbol cache) grouped by basename-occurrence to avoid collisions.
   if [ -s "$WORKDIR/dylibs.txt" ]; then
     echo "[*] Processing dyld_shared_cache for $side..."
     for arch in arm64e x86_64; do
@@ -391,16 +396,92 @@ process_side() {
       fi
 
       if [ -n "$DSC" ]; then
-        # Extract only the changed dylibs via `ipsw dyld extract` (ipsw >= 3.1):
-        # no full-cache split, no Xcode dependency, symbols/ObjC/stubs included.
         DEST_DIR="$WORKDIR/changed/$side/dylibs/$arch"
         mkdir -p "$DEST_DIR"
-        echo "[*] Extracting $(wc -l < "$WORKDIR/dylibs.txt") changed dylibs for side '$side' and arch '$arch'..."
-        while read -r dylib; do
-          [ -n "$dylib" ] || continue
-          ipsw dyld extract "$DSC" "$dylib" --objc --stubs --output "$DEST_DIR" \
-            || echo "    [WARN] Failed to extract $dylib ($side/$arch)"
-        done < "$WORKDIR/dylibs.txt"
+
+        # Tag each dylib with how many times its basename has been seen, so group 1
+        # holds all first occurrences, group 2 the duplicates, and so on. Every
+        # group is basename-unique for batching without collisions.
+        TMP="$(mktemp -d "${TMPDIR:-/tmp}/dylibs-$side-$arch-XXXXXX")"
+        awk -F/ '{ n[$NF]++; print n[$NF]"\t"$0 }' "$WORKDIR/dylibs.txt" > "$TMP/indexed"
+        MAXGRP="$(cut -f1 "$TMP/indexed" | sort -n | tail -1)"
+        [ -n "$MAXGRP" ] || MAXGRP=0
+
+        echo "[*] Extracting $(wc -l < "$WORKDIR/dylibs.txt") changed dylibs for side '$side' and arch '$arch' ($MAXGRP basename groups)..."
+
+        for ((GRP = 1; GRP <= MAXGRP; GRP++)); do
+          # Extract group GRP in batches of ~200 per call
+          awk -F'\t' -v g="$GRP" '$1 == g { print $2 }' "$TMP/indexed" > "$TMP/group"
+          N=0
+          : > "$TMP/batch"
+
+          while read -r dylib; do
+            [ -n "$dylib" ] || continue
+            echo "$dylib" >> "$TMP/batch"
+            N=$((N + 1))
+
+            if [ "$N" -ge 200 ]; then
+              # Flush this batch
+              STAGE="$TMP/stage"
+              rm -rf "$STAGE"
+              mkdir -p "$STAGE"
+
+              tr '\n' '\0' < "$TMP/batch" \
+                | xargs -0 ipsw dyld extract "$DSC" --objc --stubs --output "$STAGE" \
+                >/dev/null 2>&1 || true
+
+              # Move results back under real cache path
+              while read -r dylib; do
+                [ -n "$dylib" ] || continue
+                base="$(basename "$dylib")"
+                if [ ! -f "$STAGE/$base" ]; then
+                  ipsw dyld extract "$DSC" "$dylib" --objc --stubs --output "$STAGE" \
+                    >/dev/null 2>&1 || true
+                fi
+                if [ -f "$STAGE/$base" ]; then
+                  mkdir -p "$DEST_DIR/$(dirname "$dylib")"
+                  mv -f "$STAGE/$base" "$DEST_DIR/$base"
+                else
+                  echo "    [WARN] Failed to extract $dylib"
+                fi
+              done < "$TMP/batch"
+
+              rm -rf "$STAGE"
+              : > "$TMP/batch"
+              N=0
+            fi
+          done < "$TMP/group"
+
+          # Flush any remaining dylibs in the batch
+          if [ -s "$TMP/batch" ]; then
+            STAGE="$TMP/stage"
+            rm -rf "$STAGE"
+            mkdir -p "$STAGE"
+
+            tr '\n' '\0' < "$TMP/batch" \
+              | xargs -0 ipsw dyld extract "$DSC" --objc --stubs --output "$STAGE" \
+              >/dev/null 2>&1 || true
+
+            while read -r dylib; do
+              [ -n "$dylib" ] || continue
+              base="$(basename "$dylib")"
+              if [ ! -f "$STAGE/$base" ]; then
+                ipsw dyld extract "$DSC" "$dylib" --objc --stubs --output "$STAGE" \
+                  >/dev/null 2>&1 || true
+              fi
+              if [ -f "$STAGE/$base" ]; then
+                mkdir -p "$DEST_DIR/$(dirname "$dylib")"
+                mv -f "$STAGE/$base" "$DEST_DIR/$base"
+              else
+                echo "    [WARN] Failed to extract $dylib"
+              fi
+            done < "$TMP/batch"
+
+            rm -rf "$STAGE"
+          fi
+        done
+
+        rm -rf "$TMP"
       fi
     done
   fi
