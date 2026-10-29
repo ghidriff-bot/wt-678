@@ -1,0 +1,9 @@
+# Local IPSW downloads and extraction scratch — huge, never commit
+ipsw_diffs/IPSWs
+ipsw_diffs/**/extracted/
+ipsw_diffs/**/extracted_full/
+ipsw_diffs/**/changed/
+*.aea
+*.dmg
+._*
+.DS_Store

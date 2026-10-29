@@ -82,4 +82,4 @@ jobs:
       prev_build: ""
       next_build: ${{ matrix.build }}
       runner: ${{ github.event.inputs.runner }}
-      cleanup: ${{ github.event.inputs.cleanup }}
+      free_disk_space: ${{ github.event.inputs.cleanup == 'yes' }}

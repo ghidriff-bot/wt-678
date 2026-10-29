@@ -95,7 +95,7 @@ fi
 
 
 # ---- SET WORKDIR AFTER OLD_BUILD IS KNOWN ----
-BASE_DIR="$(pwd)/ipsw_diffs"
+BASE_DIR="${IPSW_DIFFS_DIR:-$(pwd)/ipsw_diffs}"
 IPSW_DIR="$BASE_DIR/IPSWs"
 SAFE_DEVICE="${DEVICE//,/_}"
 WORKDIR="$BASE_DIR/${SAFE_DEVICE}/${OLD_BUILD}-${NEW_BUILD}"
@@ -164,7 +164,7 @@ ZIP_SPLIT_BASE="${ZIP_BASE%.zip}"
 echo "DIFF_JSON=$DIFF_JSON"
 echo "ZIP_BASE=$ZIP_BASE"
 echo "ZIP_SPLIT_BASE=$ZIP_SPLIT_BASE"
-find "$WORKDIR/diffs"  -exec ls -lh {} \; || True
+find "$WORKDIR/diffs"  -exec ls -lh {} \; || true
 
 
 
@@ -200,7 +200,14 @@ else
   fi
   echo "ipsw diff \"$OLD_IPSW\" \"$NEW_IPSW\" --ent --launchd --json --output \"$WORKDIR/diffs\" --title \"Diff ${SAFE_DEVICE} $OLD_BUILD vs $NEW_BUILD\""
 
-  ipsw diff --block-list "__TEXT.__info_plist" \
+  # Persistent parse cache (ipsw >= 3.1): in chain order each IPSW is parsed once.
+  DIFF_CACHE_ARGS=()
+  if [ -n "${IPSW_DIFF_CACHE_DIR:-}" ]; then
+    DIFF_CACHE_ARGS=(--cache-dir "$IPSW_DIFF_CACHE_DIR" --cache-max-size "${IPSW_DIFF_CACHE_MAX:-100GiB}")
+  fi
+
+  ipsw diff --block-list "__TEXT.__info_plist" --ignore-build-timestamps \
+    ${DIFF_CACHE_ARGS[@]+"${DIFF_CACHE_ARGS[@]}"} \
     "$OLD_IPSW" "$NEW_IPSW" \
     --ent --launchd --json \
     --output "$WORKDIR/diffs" \
@@ -384,31 +391,16 @@ process_side() {
       fi
 
       if [ -n "$DSC" ]; then
-        SPLIT_DIR="$WORKDIR/extracted_full/$side/dylibs_all_$arch"
-
-        # Only split if output dir doesn't already exist with content
-        if [ ! -d "$SPLIT_DIR" ] || [ -z "$(find "$SPLIT_DIR" -type f -name '*.dylib' -print -quit)" ]; then
-          echo "    Splitting dyld_shared_cache for $arch..."
-          ipsw dyld split "$DSC" -o "$SPLIT_DIR"
-        else
-          echo "    Already split for $arch — skipping split step."
-        fi
-
-        # Copy only the changed dylibs listed in dylibs.txt
-        echo "[*] Copying $(wc -l < "$WORKDIR/dylibs.txt") dylibs for side '$side' and arch '$arch'..."
+        # Extract only the changed dylibs via `ipsw dyld extract` (ipsw >= 3.1):
+        # no full-cache split, no Xcode dependency, symbols/ObjC/stubs included.
+        DEST_DIR="$WORKDIR/changed/$side/dylibs/$arch"
+        mkdir -p "$DEST_DIR"
+        echo "[*] Extracting $(wc -l < "$WORKDIR/dylibs.txt") changed dylibs for side '$side' and arch '$arch'..."
         while read -r dylib; do
           [ -n "$dylib" ] || continue
-          src="$SPLIT_DIR/$dylib"
-          if [ -f "$src" ]; then
-            DEST_DIR="$WORKDIR/changed/$side/dylibs/$arch/$(dirname "$dylib")"
-            mkdir -p "$DEST_DIR"
-            cp "$src" "$DEST_DIR/$(basename "$dylib")"
-          fi
+          ipsw dyld extract "$DSC" "$dylib" --objc --stubs --output "$DEST_DIR" \
+            || echo "    [WARN] Failed to extract $dylib ($side/$arch)"
         done < "$WORKDIR/dylibs.txt"
-        
-        # Cleanup: Remove split dylibs to free disk space
-        echo "    → Cleaning up split dylibs for $side/$arch..."
-        rm -rf "$SPLIT_DIR"
       fi
     done
   fi
@@ -579,8 +571,8 @@ rename_with_version() {
 
 # ---- ClEANUP unmounted disk images ----
 # This seems to happen in the course of mounting everything
-rm *.aea || True
-rm *.dmg || True
+rm *.aea || true
+rm *.dmg || true
 
 # ---- CLEANUP AppleDouble files from changed output ----
 echo "[*] Cleaning up AppleDouble files from changed output..."
@@ -599,7 +591,7 @@ find "$WORKDIR/changed" -type d -empty -delete
   echo "Old IPSW URL: $(ipsw dl appledb --os "$OS_TYPE" --device "$DEVICE" --build "$OLD_BUILD" --urls)"
   echo "New IPSW URL: $(ipsw dl appledb --os "$OS_TYPE" --device "$DEVICE" --build "$NEW_BUILD" --urls)"
   echo
-}
+} >> "$WORKDIR/metadata/info.txt"
 
 # ---- ARCHIVE ----
 echo "[*] Archiving results..."
