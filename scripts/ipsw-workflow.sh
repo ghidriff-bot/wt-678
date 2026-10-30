@@ -234,10 +234,31 @@ fi
 
 
 # ---- PARSE CHANGED BINARIES ----
-# Only consider binaries with code changes (TEXT)
+# Only consider binaries with code changes: `ipsw diff` prints a `-`/`+` pair
+# for a section whose SIZE changed, so "-  __TEXT.__text:" means the code moved.
+# (Newer ipsw also emits a "Sections with Same Size but Changed Content" block.
+# Measured on iPhone13,3 24A446->24B119 that block never lists __TEXT.__text —
+# 146 dylibs and 1776 machos carry it, none for code — so it adds nothing here.
+# Worth re-checking if that ever changes: it would be the precise signal for a
+# same-size instruction patch.)
+#
+# dylibs and kexts are keyed flat under .updated/.new/.removed. machos are NOT:
+# newer ipsw nests them per volume — .machos.filesystem.updated, plus AppOS,
+# SystemOS and (macOS 26+) ExclaveOS. Reading .machos.updated therefore yields
+# NOTHING on every modern diff, machos.txt comes out empty, and no standalone
+# executable is ever extracted. Measured across 7 pairs on this device set:
+# 7568 changed Mach-Os silently dropped (1821 in 24A446->24B119 alone).
+# So walk both shapes and dedupe: flat for older diffs, one level down per
+# volume for current ones.
 jq -r '.kexts.updated // {} | to_entries[] | select(.value | contains("-  __TEXT_EXEC.__text")) | .key' "$DIFF_JSON" > "$WORKDIR/kexts.txt" || true
 jq -r '.dylibs.updated // {} | to_entries[] | select(.value | contains("-  __TEXT.__text")) | .key' "$DIFF_JSON" > "$WORKDIR/dylibs.txt" || true
-jq -r '.machos.updated // {} | to_entries[] | select(.value | contains("-  __TEXT.__text")) | .key' "$DIFF_JSON" > "$WORKDIR/machos.txt" || true
+jq -r '
+  (.machos // {}) as $m
+  | [ ($m.updated // {} | to_entries[]),
+      ($m | to_entries[] | select(.value | type == "object") | .value.updated // {} | to_entries[]) ]
+  | map(select((.value | type == "string") and (.value | contains("-  __TEXT.__text"))) | .key)
+  | unique | .[]
+' "$DIFF_JSON" > "$WORKDIR/machos.txt" || true
 # ---- EXTRACTION ----
 # 1. Build combined MACHO regex (if any)
 if [[ -s "$WORKDIR/machos.txt" ]]; then
@@ -297,6 +318,16 @@ extract_all() {
     local dyld_arch_args=()
     if [ -n "$EXTRACT_DYLD_FLAG" ]; then
       dyld_arch_args=(--dyld-arch "$arch")
+    fi
+
+    # With all three lists empty there is nothing to ask for, and `ipsw extract`
+    # with no component flag exits non-zero ("must specify at least one flag").
+    # That used to abort the whole pair: 23G83->23G90 (26.6.1 -> 26.6.2) changed
+    # no code at all and died at the archive step on a missing changed/ dir.
+    # A pair with nothing to extract is a legitimate result, not a failure.
+    if [ -z "$EXTRACT_KERNEL_FLAG$EXTRACT_DYLD_FLAG$EXTRACT_FILES_FLAG" ]; then
+      echo "    (no changed components to extract for $arch — skipping)"
+      return 0
     fi
 
     echo "    → Extracting $arch dyld..."
@@ -569,7 +600,7 @@ process_side "new" "$NEW_IPSW"
 # ---- CLEANUP AppleDouble files from changed output ----
 echo "[*] Cleaning up AppleDouble files from changed output..."
 find "$WORKDIR/changed" -type f -name "._*" -delete
-find "$WORKDIR/changed" -type d -empty -delete
+find "$WORKDIR/changed" -mindepth 1 -type d -empty -delete
 
 # ---- SPLIT FAT BINARIES ----
 echo "[*] Scanning for fat/universal binaries in changed output..."
@@ -675,7 +706,7 @@ rm *.dmg || true
 # ---- CLEANUP AppleDouble files from changed output ----
 echo "[*] Cleaning up AppleDouble files from changed output..."
 find "$WORKDIR/changed" -type f -name "._*" -delete
-find "$WORKDIR/changed" -type d -empty -delete
+find "$WORKDIR/changed" -mindepth 1 -type d -empty -delete
 
 # ---- METADATA ----
 {
