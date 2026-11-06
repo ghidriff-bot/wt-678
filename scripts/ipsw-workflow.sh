@@ -206,7 +206,14 @@ else
     DIFF_CACHE_ARGS=(--cache-dir "$IPSW_DIFF_CACHE_DIR" --cache-max-size "${IPSW_DIFF_CACHE_MAX:-100GiB}")
   fi
 
+  # macOS 27 (26A428+) IPSWs carry MORE THAN ONE SystemOS DMG — one for the
+  # long-standing Mac family and a second for newer boards (Mac18,5) — and
+  # `ipsw diff` refuses to guess: "multiple SystemOS DMGs found; select a
+  # device (use --device)". Without it the diff exits 1 and the pair dies
+  # before any work happens. Passing --device is harmless on single-DMG
+  # firmware, so it is unconditional rather than gated on OS or build.
   ipsw diff --block-list "__TEXT.__info_plist" --ignore-build-timestamps \
+    --device "$DEVICE" \
     ${DIFF_CACHE_ARGS[@]+"${DIFF_CACHE_ARGS[@]}"} \
     "$OLD_IPSW" "$NEW_IPSW" \
     --ent --launchd --json \
@@ -334,8 +341,15 @@ extract_all() {
     mkdir -p "$arch_dir"
     echo "[*] Running extract for arch: $arch"
 
-    # Run the actual command
+    # --device for the same reason `ipsw diff` needs it: a macOS 27 IPSW holds
+    # more than one SystemOS DMG and the --files pass refuses to guess. Note
+    # --kernel and --dyld succeed WITHOUT it, so the command only fails at the
+    # end: kexts and dylibs land, machos silently do not, and the per-side
+    # `|| echo "($arch not found)"` swallows the non-zero exit. That is how
+    # 25G83->26A428 reported success with 5094 wanted machos and 0 extracted
+    # (10188 "not found" warnings, one per macho per side).
     ipsw extract $EXTRACT_KERNEL_FLAG $EXTRACT_DYLD_FLAG $EXTRACT_FILES_FLAG \
+      --device "$DEVICE" \
       ${dyld_arch_args[@]+"${dyld_arch_args[@]}"} \
       ${pattern_args[@]+"${pattern_args[@]}"} \
       -o "$arch_dir" "$ipsw_file" || echo "    ($arch not found)"
@@ -707,6 +721,37 @@ rm *.dmg || true
 echo "[*] Cleaning up AppleDouble files from changed output..."
 find "$WORKDIR/changed" -type f -name "._*" -delete
 find "$WORKDIR/changed" -mindepth 1 -type d -empty -delete
+
+# ---- COMPLETENESS GATE ----
+# Every per-binary extraction failure is a warning, and the per-arch extract is
+# `|| echo "($arch not found)"`, so a run that archives NOTHING still exits 0.
+# That is how the macOS 27 --device bug shipped a "✅ done" pair with 5094
+# wanted machos and 0 extracted. Compare want vs got per class and refuse to
+# archive a short result: a partial archive published as complete is worse
+# than a failed run, because nothing downstream can tell the difference.
+#
+# Each wanted path should appear once per side (old+new), so the ratio is 2.
+# A lower count is reported as a shortfall; extra files (multi-arch dylibs on
+# macOS) are fine and not flagged.
+SHORTFALL=0
+: > "$WORKDIR/metadata/extraction_report.txt"
+for class in kexts dylibs machos; do
+  want=$(grep -cve '^[[:space:]]*$' "$WORKDIR/$class.txt" 2>/dev/null || echo 0)
+  got=$(find "$WORKDIR/changed" -path "*/$class/*" -type f ! -name "._*" 2>/dev/null | wc -l | tr -d ' ')
+  expect=$((want * 2))
+  printf '%-8s want=%-6s expect=%-6s got=%-6s\n' "$class" "$want" "$expect" "$got" \
+    | tee -a "$WORKDIR/metadata/extraction_report.txt"
+  if [ "$want" -gt 0 ] && [ "$got" -lt "$want" ]; then
+    echo "  [SHORTFALL] $class: only $got of >=$want expected files" \
+      | tee -a "$WORKDIR/metadata/extraction_report.txt" >&2
+    SHORTFALL=1
+  fi
+done
+if [ "$SHORTFALL" = 1 ]; then
+  echo "❌ Extraction incomplete — refusing to archive." >&2
+  echo "   See $WORKDIR/metadata/extraction_report.txt" >&2
+  exit 1
+fi
 
 # ---- METADATA ----
 {
