@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>patch-diffing status</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --line:#2a313c; --fg:#e6edf3; --dim:#8b949e;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --none:#30363d; --accent:#58a6ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#fff; --panel:#f6f8fa; --line:#d0d7de; --fg:#1f2328; --dim:#656d76;
+            --none:#d0d7de; }
+  }
+  * { box-sizing:border-box }
+  body { margin:0; padding:2rem 1.25rem; background:var(--bg); color:var(--fg);
+         font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",sans-serif }
+  main { max-width:1100px; margin:0 auto }
+  h1 { font-size:1.35rem; margin:0 0 .25rem }
+  .sub { color:var(--dim); margin:0 0 1.5rem; font-size:.875rem }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+           gap:.75rem; margin-bottom:1.5rem }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:.85rem 1rem }
+  .card .k { color:var(--dim); font-size:.75rem; text-transform:uppercase;
+             letter-spacing:.04em }
+  .card .v { font-size:1.5rem; font-weight:600; margin-top:.15rem }
+  .dev { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+         padding:1rem 1.15rem; margin-bottom:1.25rem }
+  .dev h2 { font-size:1rem; margin:0 0 .15rem; display:flex; gap:.5rem;
+            align-items:baseline; flex-wrap:wrap }
+  .dev h2 small { color:var(--dim); font-weight:400; font-size:.8rem }
+  .bar { display:flex; height:8px; border-radius:4px; overflow:hidden;
+         background:var(--none); margin:.75rem 0 .5rem }
+  .bar i { display:block }
+  .bar .d { background:var(--ok) } .bar .i { background:var(--warn) }
+  .legend { color:var(--dim); font-size:.8rem; display:flex; gap:1rem;
+            flex-wrap:wrap; margin-bottom:.5rem }
+  .legend b { font-weight:600; color:var(--fg) }
+  table { width:100%; border-collapse:collapse; font-size:.8rem;
+          font-variant-numeric:tabular-nums }
+  th { text-align:left; color:var(--dim); font-weight:500; padding:.4rem .5rem;
+       border-bottom:1px solid var(--line); position:sticky; top:0;
+       background:var(--panel) }
+  td { padding:.35rem .5rem; border-bottom:1px solid var(--line) }
+  tr:last-child td { border-bottom:0 }
+  .pill { display:inline-block; padding:.05rem .45rem; border-radius:999px;
+          font-size:.7rem; font-weight:600 }
+  .s-done { background:color-mix(in srgb,var(--ok) 18%,transparent); color:var(--ok) }
+  .s-incomplete { background:color-mix(in srgb,var(--warn) 18%,transparent); color:var(--warn) }
+  .s-missing { background:color-mix(in srgb,var(--dim) 15%,transparent); color:var(--dim) }
+  .short { color:var(--bad); font-weight:600 }
+  .scroll { max-height:26rem; overflow:auto; border-radius:6px }
+  details summary { cursor:pointer; color:var(--accent); font-size:.8rem;
+                    margin-top:.35rem }
+  .live { display:inline-block; width:8px; height:8px; border-radius:50%;
+          background:var(--ok); margin-right:.35rem }
+  .live.off { background:var(--dim) }
+  .err { background:var(--panel); border:1px solid var(--bad); border-radius:8px;
+         padding:1rem; color:var(--bad) }
+  code { font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace }
+</style>
+<main>
+  <h1>patch-diffing corpus</h1>
+  <p class="sub" id="sub">loading…</p>
+  <div id="root"></div>
+</main>
+<script>
+const gib = b => (b / 1073741824).toFixed(1) + ' GiB';
+const ago = s => s == null ? 'n/a'
+  : s < 90 ? s + 's ago'
+  : s < 5400 ? Math.round(s / 60) + 'm ago'
+  : s < 172800 ? Math.round(s / 3600) + 'h ago'
+  : Math.round(s / 86400) + 'd ago';
+
+fetch('status.json?' + Date.now())
+  .then(r => { if (!r.ok) throw new Error('status.json ' + r.status); return r.json() })
+  .then(render)
+  .catch(e => {
+    document.getElementById('sub').textContent = '';
+    document.getElementById('root').innerHTML =
+      '<div class="err">Could not load <code>status.json</code>: ' + e.message +
+      '<br>Run <code>scripts/status.sh</code> and commit the result.</div>';
+  });
+
+function render(r) {
+  const tot = r.devices.reduce((a, d) => ({
+    done: a.done + d.pairs_done,
+    inc:  a.inc  + d.pairs_incomplete,
+    miss: a.miss + d.pairs_missing,
+    poss: a.poss + d.pairs_possible,
+    bytes:a.bytes+ d.bytes_total,
+  }), {done:0, inc:0, miss:0, poss:0, bytes:0});
+
+  document.getElementById('sub').innerHTML =
+    `<span class="live ${r.chain_running ? '' : 'off'}"></span>` +
+    (r.chain_running ? 'chain running' : 'idle') +
+    ` · newest log ${ago(r.newest_log_age_seconds)}` +
+    ` · generated ${r.generated}`;
+
+  let h = `<div class="cards">
+    <div class="card"><div class="k">pairs done</div><div class="v">${tot.done}<span style="font-size:.9rem;color:var(--dim)">/${tot.poss}</span></div></div>
+    <div class="card"><div class="k">incomplete</div><div class="v" style="color:${tot.inc ? 'var(--warn)' : 'inherit'}">${tot.inc}</div></div>
+    <div class="card"><div class="k">not started</div><div class="v">${tot.miss}</div></div>
+    <div class="card"><div class="k">corpus size</div><div class="v">${gib(tot.bytes)}</div></div>
+  </div>`;
+
+  for (const d of r.devices) {
+    const pd = d.pairs_possible ? d.pairs_done / d.pairs_possible * 100 : 0;
+    const pi = d.pairs_possible ? d.pairs_incomplete / d.pairs_possible * 100 : 0;
+    // Newest first reads better: the head pair is what people check.
+    const rows = d.pairs.slice().reverse().map(p => {
+      const c = p.counts || {};
+      const cell = k => {
+        if (!c[k]) return '<td class="s-missing">–</td>';
+        const { want, got } = c[k];
+        if (!want && !got) return '<td class="s-missing">–</td>';
+        const bad = want > 0 && got < want;
+        return `<td class="${bad ? 'short' : ''}">${got}<span style="color:var(--dim)">/${want * 2 || 0}</span></td>`;
+      };
+      return `<tr>
+        <td><code>${p.old}→${p.new}</code></td>
+        <td><span class="pill s-${p.state}">${p.state}</span></td>
+        ${cell('machos')}${cell('dylibs')}${cell('kexts')}
+        <td>${p.files ? p.files.toLocaleString() : '–'}</td>
+        <td>${p.bytes ? gib(p.bytes) : '–'}</td>
+      </tr>`;
+    }).join('');
+
+    h += `<div class="dev">
+      <h2>${d.device} <small>${d.os} · head ${d.head_build ?? '?'} · ${d.builds_served} builds served</small></h2>
+      <div class="bar"><i class="d" style="width:${pd}%"></i><i class="i" style="width:${pi}%"></i></div>
+      <div class="legend">
+        <span><b>${d.pairs_done}</b> done</span>
+        <span><b>${d.pairs_incomplete}</b> incomplete</span>
+        <span><b>${d.pairs_missing}</b> not started</span>
+        <span><b>${gib(d.bytes_total)}</b></span>
+      </div>
+      <details><summary>per-pair detail (${d.pairs.length})</summary>
+        <div class="scroll"><table>
+          <thead><tr><th>pair</th><th>state</th><th>machos</th><th>dylibs</th>
+                     <th>kexts</th><th>files</th><th>size</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </details>
+    </div>`;
+  }
+
+  if (r.ota_anomalies && r.ota_anomalies.length) {
+    h += `<div class="dev"><h2>OTA structure anomalies <small>unexpected top-level dirs</small></h2>
+      <table><thead><tr><th>build</th><th>unexpected</th></tr></thead><tbody>` +
+      r.ota_anomalies.map(a =>
+        `<tr><td><code>${a.label}</code></td><td><code>${a.unexpected}</code></td></tr>`).join('') +
+      `</tbody></table></div>`;
+  }
+
+  document.getElementById('root').innerHTML = h;
+}
+</script>
