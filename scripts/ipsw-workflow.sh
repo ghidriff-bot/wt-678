@@ -275,10 +275,17 @@ if [[ -s "$WORKDIR/machos.txt" ]]; then
     # | sed -E 'h; s/[.^$*+?(){}|\\]/\\&/g; G; s/\n/ -> /'
     # echo
 
+  # Escape every regex metacharacter, INCLUDING [ and ]. Omitting the brackets
+  # was not cosmetic: /bin/[ (the test(1) binary) ships in every macOS
+  # filesystem, and one unescaped [ opens a character class that swallows the
+  # rest of the alternation. Go's regexp then rejects the whole pattern —
+  # "error parsing regexp: invalid character class range: `h-a`" — so the
+  # --files pass extracted NOTHING while --kernel and --dyld still succeeded.
+  # One path in 5094 silently cost every macho in the pair.
   echo "[*] Building MACHO_REGEX..."
   MACHO_REGEX=$(
     grep -v '^[[:space:]]*$' "$WORKDIR/machos.txt" \
-    | sed -E 's/[.^$*+?(){}|\\]/\\&/g' \
+    | sed -E 's/[].[^$*+?(){}|\\]/\\&/g' \
     | paste -sd'|' -
   )
 else
