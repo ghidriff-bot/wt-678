@@ -120,9 +120,13 @@ echo "[*] old IPSW: $(basename "$OLD_IPSW")"
 # ---- 3. Extract the old filesystem as the patch base ----
 # --device for the same reason the main workflow needs it: a macOS 27 IPSW
 # carries more than one SystemOS DMG and the files pass refuses to guess.
+#
+# --files needs a --pattern; on its own it exits "must specify at least one
+# flag to specify what to extract". The patch has to land on the whole
+# filesystem, so the pattern matches everything.
 if [ -z "$(find "$WORKDIR/base" -type f -print -quit 2>/dev/null)" ]; then
-  echo "[*] extracting old filesystem (patch base)..."
-  ipsw extract --files --device "$DEVICE" -o "$WORKDIR/base" "$OLD_IPSW"
+  echo "[*] extracting old filesystem (patch base) — this is the slow step..."
+  ipsw extract --files --pattern '.*' --device "$DEVICE" -o "$WORKDIR/base" "$OLD_IPSW"
 else
   echo "[*] patch base already extracted — skipping."
 fi
