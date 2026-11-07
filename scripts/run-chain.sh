@@ -55,6 +55,47 @@ echo "    logs:   $LOG_DIR"
 echo "    script: $SNAP/ipsw-workflow.sh ($(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?'))"
 echo
 
+# ---- KEEP_IPSW=0: reclaim each IPSW once the chain is past it ----
+# A full backfill downloads ~2.1TB of IPSWs to produce ~400GB of diffs. The
+# IPSWs are the recoverable half — Apple still serves every build back to
+# iOS 14, including the 31 that ipsw.me delisted (appledb has live URLs) — so
+# deleting them as the chain advances turns a 2.5TB job into ~450GB peak.
+#
+# In chain order each build is used by exactly two pairs: as NEW, then as OLD.
+# So once pair i succeeds, BUILDS[i] has served both and is free. BUILDS[i+1]
+# is NOT, because it is the OLD of pair i+1.
+#
+# Deletion happens only after a pair exits 0, which means it cleared the
+# completeness gate — a failed or short extraction keeps its input so the pair
+# can be retried without a re-download.
+KEEP_IPSW="${KEEP_IPSW:-1}"
+IPSW_POOL="$BASE_DIR/IPSWs"
+
+# The pool is usually a symlink to a directory shared with other repos
+# (wf-at56 points at the same one), so a delete here is NOT local to this
+# chain. Resolve it and say so rather than quietly removing another workspace's
+# inputs.
+if [ "$KEEP_IPSW" = 0 ]; then
+  real_pool="$(cd "$IPSW_POOL" 2>/dev/null && pwd -P || echo "$IPSW_POOL")"
+  echo "[!] KEEP_IPSW=0 — IPSWs will be deleted as the chain advances"
+  echo "    pool: $real_pool"
+  [ "$real_pool" != "$IPSW_POOL" ] && \
+    echo "    ⚠ this is a SHARED pool ($IPSW_POOL -> $real_pool); other repos use it"
+  echo
+fi
+
+reclaim_ipsw() {            # $1 = build no longer needed by this chain
+  local build="$1" f
+  [ "$KEEP_IPSW" = 0 ] || return 0
+  # -L so a symlinked pool is followed; print -quit to stop at the first hit.
+  f="$(find -L "$IPSW_POOL" -maxdepth 1 -type f \
+        -name "*_${build}_Restore.ipsw" ! -name '._*' -print -quit 2>/dev/null)"
+  if [ -n "$f" ]; then
+    echo "    [reclaim] rm $(basename "$f") ($(du -h "$f" 2>/dev/null | cut -f1))"
+    rm -f "$f"
+  fi
+}
+
 failed=()
 for ((i = 0; i < ${#BUILDS[@]} - 1; i++)); do
   OLD="${BUILDS[i]}"; NEW="${BUILDS[i+1]}"
@@ -64,6 +105,7 @@ for ((i = 0; i < ${#BUILDS[@]} - 1; i++)); do
   if "$SNAP/ipsw-workflow.sh" "$OS_TYPE" "$DEVICE" "$OLD" "$NEW" >>"$LOG" 2>&1; then
     d="$BASE_DIR/${SAFE_DEVICE}/${OLD}-${NEW}"
     echo "    ✅ done — changed=$(find "$d/changed" -type f 2>/dev/null | wc -l | tr -d ' ') files, $(du -sh "$d" 2>/dev/null | cut -f1)"
+    reclaim_ipsw "$OLD"
   else
     echo "    ❌ FAILED — see $LOG"
     echo "       last lines:"
