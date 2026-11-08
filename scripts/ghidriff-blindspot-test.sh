@@ -98,12 +98,19 @@ for v in base const stack struct; do
   mod=$(python3 -I -c "import json,sys;print(json.load(open(sys.argv[1]))['stats'].get('modified_funcs_len','?'))" "$j" 2>/dev/null)
   same=$([ "$(txt "bin.base")" = "$(txt "bin.$v")" ] && echo yes || echo no)
 
+  # base must report exactly 0; the others must report at least 1. More than
+  # one is fine and expected — a changed constant also shifts the C runtime
+  # entry stub, so the fixed engine reports 2. Demanding exactly 1 would fail
+  # a correct result.
   case "$v" in
-    base)   exp=0; label="control" ;;
-    struct) exp=1; label="should detect" ;;
-    *)      exp=1; label="BLIND SPOT if 0" ;;
+    base)   label="control, must be 0"
+            [ "$mod" = "0" ] && verdict="ok ($label)" || verdict="REGRESSION ($label)" ;;
+    struct) label="structural, must detect"
+            [ "${mod:-0}" -ge 1 ] 2>/dev/null && verdict="ok ($label)" || verdict="FAIL ($label)" ;;
+    *)      label="operand-only"
+            [ "${mod:-0}" -ge 1 ] 2>/dev/null && verdict="ok ($label, fix present)" \
+              || verdict="BLIND SPOT ($label, unpatched)" ;;
   esac
-  if [ "$mod" = "$exp" ]; then verdict="ok ($label)"; else verdict="MISMATCH exp=$exp ($label)"; fi
   printf "  %-8s %-10s %-10s %s\n" "$v" "$same" "$mod" "$verdict"
 done
 
