@@ -1,0 +1,54 @@
+Subject: [PATCH] detect operand-only changes (constants, stack sizes)
+
+ghidriff does not report a function whose only change is an operand: a
+bounds constant, a stack frame size, a struct offset. The function is not
+listed as modified; it does not appear in the report at all.
+
+The 'code' diff type is gated on:
+
+    if len(only_code_diff) > 0 and (mnemonics_ratio < 1.0 or blocks_ratio < 1.0):
+
+`instructions` is str(code_unit) and keeps operands ("cmp x0, #0x40").
+`mnemonics` is code_unit.getMnemonicString() and drops them ("cmp"). An
+operand-only edit leaves both mnemonics_ratio and blocks_ratio at 1.0, so the
+guard is False and 'code' is never appended. When no other diff_type fires,
+the function is then discarded entirely by the `if len(diff_type) == 0:
+continue` below.
+
+`instructions_ratio` is already computed on the preceding line and is < 1.0
+for precisely these cases. It is carried into the result as 'i_ratio' but
+never consulted when deciding whether code changed. Adding it to the guard
+closes the gap without introducing a new comparison.
+
+This matters because an operand-only change is a normal shape for a security
+fix. The canonical example is MS03-026 (Blaster), whose patch was a stack
+buffer size change. Measured on a four-way harness built from one source
+(scripts/ghidriff-blindspot-test.sh in the wt-678 pipeline repo):
+
+    case     same __text size   modified_funcs_len   before -> after
+    base     yes                0                    0  (control, must stay 0)
+    const    yes                0                    1   n > 64 -> n > 32
+    stack    yes                0                    1   buf[256] -> buf[128]
+    struct   no                 1                    1   added if statement
+
+Measured with ghidriff 1.x, Ghidra 12.2, --min-func-len 1, on arm64 macOS;
+both the SimpleDiff and default engines behave the same way.
+
+--- a/ghidriff/ghidra_diff_engine.py
++++ b/ghidriff/ghidra_diff_engine.py
+@@ -1729,7 +1729,13 @@
+             only_code_diff = ''.join(list(difflib.unified_diff(old_code_no_sig, new_code_no_sig, lineterm='\n',
+                                      fromfile=from_file_name, tofile=to_file_name)))  # ignores name changes
+
+-            if len(only_code_diff) > 0 and (mnemonics_ratio < 1.0 or blocks_ratio < 1.0):
++            # instructions_ratio is the only one of the three that is sensitive
++            # to operands. Without it an operand-only change — a bounds
++            # constant, a stack frame size, a struct offset — leaves mnemonics
++            # and blocks identical, so 'code' is never appended and the
++            # function is dropped by the empty-diff_type check below.
++            if len(only_code_diff) > 0 and (instructions_ratio < 1.0
++                                            or mnemonics_ratio < 1.0
++                                            or blocks_ratio < 1.0):
+
+                 # handle bad match external match (sometimes occurs with implied matches)
+                 if ratio == 0.0 and (blocks_ratio == 0.0):

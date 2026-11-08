@@ -104,8 +104,17 @@ norm() {
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/textchg-XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
-norm "$OLD" > "$TMP/old.txt" || { echo "[ERROR] no __TEXT.__text in $OLD" >&2; exit 2; }
-norm "$NEW" > "$TMP/new.txt" || { echo "[ERROR] no __TEXT.__text in $NEW" >&2; exit 2; }
+# The two sides are independent and disassembly dominates the runtime —
+# measured on Bom, 12s of a 17s run is one side alone — so run them
+# concurrently. Exit status is captured per side rather than read from the
+# pipeline, otherwise a failed disassembly would look like an empty section
+# and be reported as "unchanged".
+norm "$OLD" > "$TMP/old.txt" & pid_o=$!
+norm "$NEW" > "$TMP/new.txt" & pid_n=$!
+wait "$pid_o"; rc_o=$?
+wait "$pid_n"; rc_n=$?
+[ "$rc_o" -eq 0 ] || { echo "[ERROR] no __TEXT.__text in $OLD" >&2; exit 2; }
+[ "$rc_n" -eq 0 ] || { echo "[ERROR] no __TEXT.__text in $NEW" >&2; exit 2; }
 
 no=$(wc -l < "$TMP/old.txt" | tr -d ' ')
 nn=$(wc -l < "$TMP/new.txt" | tr -d ' ')
