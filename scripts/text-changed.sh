@@ -52,6 +52,26 @@
 # "no" is worth more than a sensitive "maybe", so this stays conservative:
 # it under-reports rather than inventing changes.
 #
+# WHY NOT JUST MASK BYTES (it would be ~1000x faster)
+# ---------------------------------------------------
+# Disassembling is slow: CoreAudio's __text is 5.3M instructions and takes
+# minutes. ARM64 is fixed-width, so the obvious optimisation is to mask the
+# address-bearing opcodes (B, BL, B.cond, CBZ/TBZ, ADR/ADRP, LDR-literal) and
+# compare the remaining bytes in milliseconds. That was built and it FAILS the
+# control: ARKit, byte-identical in code, still reported 33 differing words.
+#
+# Inspecting them shows why:
+#     0xf947e900 -> 0xf947f100    ldr  x0, [x8, #imm12]
+#     0x910ca042 -> 0x91124042    add  x2, x2, #imm12
+#
+# Cache rebasing shifts ordinary immediate offsets in LDR/ADD too, not just
+# PC-relative branch targets, because those immediates index GOT and data that
+# moved. At the byte level such a shift is indistinguishable from a genuine
+# constant change, which is also why normalising every hex literal (above) is
+# required rather than merely convenient — and why a pure-constant change is
+# fundamentally unrecoverable from a cache-extracted binary, not just missed
+# by this script.
+#
 # Needs --force on disassembly, because a dylib extracted without slide info
 # has stub pointers that fall outside its own segments.
 
