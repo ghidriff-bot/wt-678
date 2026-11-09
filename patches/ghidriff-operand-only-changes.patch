@@ -39,6 +39,26 @@ reports nothing.
    on the preceding line, is < 1.0 for exactly these cases, and is already
    carried out as 'i_ratio' — it simply is not consulted.
 
+   THE OMISSION IS DELIBERATE, NOT AN OVERSIGHT. All three streams are built
+   together in the same loop (ghidra_diff_engine.py ~line 437):
+
+       instructions.append(str(code))                  # keeps operands
+       mnemonics.append(str(code.getMnemonicString())) # drops operands
+       ...
+       blocks.extend(sorted(units))   # "sort - This case handles the case
+                                      #  for compiler optimizations"
+
+   The gate is built from exactly the two operand-free signals, and blocks is
+   additionally sorted so that reordering within a basic block does not count
+   either. That comment is the author stating the intent outright: the trigger
+   is meant to survive a recompile. i_ratio is computed, reported in the
+   markdown table, and never used to decide anything — it is a diagnostic.
+
+   Which makes this a specificity-for-sensitivity trade, and the measurement
+   below says the trade is correct for cache-resident input and wrong only for
+   rebase-free input. So instructions_ratio must go behind an opt-in flag
+   rather than into the default gate.
+
 Measured with scripts/ghidriff-blindspot-test.sh (ghidriff 1.x, Ghidra 12.2,
 --min-func-len 1, arm64 macOS; SimpleDiff and the default engine agree):
 
@@ -89,6 +109,29 @@ stream (addresses, labels and hex literals masked) rather than raw bytes,
 which is what scripts/text-changed.sh does. That also inherits its limit:
 a pure-constant change then becomes invisible, so masking alone cannot be
 the whole answer for cache-resident binaries.
+
+HOW MUCH IS THERE TO FIND HERE ANYWAY: ZERO, ON THIS INPUT
+----------------------------------------------------------
+The case for this patch was that operand-only change is a real and common
+shape. On standalone Mach-Os that stands — the harness proves it, and MS03-026
+is the canonical example. On cache-extracted dylibs it does not:
+
+  40 randomly sampled changed dylibs, iOS 26.7.1 -> 26.7.2, arm64e:
+      7  __TEXT.__text size changed  (real change, caught by the cheap filter)
+     30  version string only, normalised code stream IDENTICAL
+      0  same size with a differing instruction stream
+      1  disassembly error
+
+So there is no population of same-size code changes hiding behind ghidriff's
+gate for this input. Measurements claiming otherwise (including an earlier
+53% figure recorded here) came from a normaliser bug that let a zero offset
+through unmasked — `ldr x0, [x8, #0x1a8]` -> `ldr x0, [x8]`, which carries no
+0x prefix on one side and so escaped the mask.
+
+Conclusion for upstream: hunk 1 should normalise rather than compare raw
+bytes, hunk 2 belongs behind a flag (--operand-changes), and the flag is
+worth having for filesystem machos and standalone binaries, not for
+shared-cache work.
 
 --- a/ghidriff/ghidra_diff_engine.py
 +++ b/ghidriff/ghidra_diff_engine.py

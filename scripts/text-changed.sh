@@ -35,22 +35,47 @@
 #   * replace every hex literal with a placeholder
 #   * replace loc_/sub_/func_ labels with a placeholder
 #
-# Validated both directions on 23G90 -> 23H128:
-#   ARKit (version identical in both caches)  -> 329 vs 329 instructions,
-#                                                streams IDENTICAL
-#   MediaAnalysisGeneration (version bumped)  -> 2 instructions changed,
-#                                                `ldr x0, [x8, #N]` becoming
-#                                                `ldr x0, [x8]`
+# Validated on 23G90 -> 23H128 against dylibs whose version string is
+# IDENTICAL in both caches, so any reported change is by definition false:
+#   ARKit                  -> 329 vs 329 instructions, streams IDENTICAL
+#   ActionButtonSelector   -> 15609 instructions, 0 changed
+#
+# WHAT THIS ACTUALLY FINDS, AND WHY THE ANSWER IS "ALMOST NOTHING"
+# ---------------------------------------------------------------
+# The honest result of pointing this at the full iOS 26.7.1 -> 26.7.2 dylib
+# set is that same-size code change essentially does not occur. Of 40 randomly
+# sampled changed dylibs (38 completed, 1 disassembly error):
+#
+#     7  (18%)  __TEXT.__text SIZE changed       -> real code change, already
+#                                                   caught by the cheap filter
+#    30  (79%)  version string changed only      -> code stream IDENTICAL
+#     0  ( 0%)  same size, instruction stream differs
+#
+# An earlier run of this same sample reported 23 of those 30 as same-size code
+# changes. Every one was a bug in the normaliser below, not a finding. The
+# claim that 53% of changed dylibs carry code changes the size filter misses
+# was wrong, and the corrected number is zero. A version bump with no code
+# change is what a cache rebuild looks like: the dylib is recompiled, its
+# version string moves, and its code comes out the same.
+#
+# So the size filter is not leaking security fixes. This script's value is as
+# a NEGATIVE oracle — it is what proves a binary that differs on disk did not
+# change its code — not as a second source of candidates.
 #
 # KNOWN LIMITATION
 # ----------------
-# Masking every hex literal also masks immediates, so a change that only
-# alters a constant (a bounds value, a size, a flag) is invisible here. The
-# obvious refinement — keep short immediates, mask only wide cache addresses —
-# was tried and rejected: it let 66 lines of rebase noise back into the ARKit
-# control, which would produce false positives on unchanged binaries. A sound
-# "no" is worth more than a sensitive "maybe", so this stays conservative:
-# it under-reports rather than inventing changes.
+# Masking every immediate means a change that only alters a constant (a bounds
+# value, a stack frame size, a flag) is invisible here. That is not a corner
+# case: it is the Blaster/MS03-026 shape, the exact thing worth catching. It
+# is given up deliberately, because on a cache-extracted binary a constant is
+# not recoverable in the first place — rebasing rewrites LDR/ADD immediates
+# that index GOT and data which moved, so a shifted offset and an edited
+# constant are the same bytes. Keeping short immediates and masking only wide
+# addresses was tried: it let 66 lines of noise back into the ARKit control.
+#
+# A constant-level diff therefore needs a rebase-free input (a filesystem
+# macho, which keeps __TEXT at 0x100000000 across builds) rather than a
+# cleverer mask on a cache-extracted one.
 #
 # WHY NOT JUST MASK BYTES (it would be ~1000x faster)
 # ---------------------------------------------------
@@ -85,6 +110,16 @@ for f in "$OLD" "$NEW"; do
   [ -f "$f" ] || { echo "[ERROR] no such file: $f" >&2; exit 2; }
 done
 
+# A zero offset is written two ways and neither carries an 0x prefix, so
+# masking only /0x[0-9a-f]+/ let cache layout leak through as a code change:
+#
+#     ldr x0, [x8, #0x1a8]  ->  ldr x0, [x8]      offset became 0
+#     add x3, x3, #0        ->  add x3, x3, #0x20 offset became non-zero
+#
+# Measured: ActionButtonSelector, whose version string is IDENTICAL in both
+# caches, reported 3 such lines; 5 of 5 sampled "changed" dylibs reported
+# ONLY this pattern and nothing else. So [reg] is canonicalised to [reg, #0]
+# first and every immediate is masked, not just hex ones.
 norm() {
   local f="$1" sz addr
   sz=$(ipsw macho info "$f" 2>/dev/null \
@@ -97,6 +132,8 @@ norm() {
     | sed -E 's/^[[:space:]]*0x[0-9a-f]+:[[:space:]]*//' \
     | sed -E 's/^([0-9a-f]{2} ){3}[0-9a-f]{2}[[:space:]]*//' \
     | sed -E 's/[[:space:]]*;.*$//' \
+    | sed -E 's/\[([a-z0-9]+)\]/[\1, #0]/' \
+    | sed -E 's/#(0x[0-9a-f]+|[0-9]+)/#IMM/g' \
     | sed -E 's/0x[0-9a-f]+/ADDR/g; s/(loc|sub|func)_[0-9a-f]+/LBL/g' \
     | grep -vE '^[[:space:]]*$|^[_a-zA-Z0-9]+:$'
 }
