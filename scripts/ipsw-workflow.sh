@@ -374,6 +374,37 @@ extract_all() {
 
 
 
+# `ipsw extract` names each kernelcache after the device list in the
+# BuildManifest:
+#
+#   kernelcache.release.Mac13,1_2_MacBookPro18,1_2_3_4
+#     = Mac13,1  Mac13,2  MacBookPro18,1 .. MacBookPro18,4
+#
+# A token containing a comma starts a new family; bare tokens that follow are
+# further minor numbers of that family. Returns 0 when $2 appears in the list.
+#
+# Depends on word-splitting under IFS=_, which bash does and zsh does not. The
+# shebang here is bash so this is safe, but run under zsh it would silently
+# match nothing and every pair would abort as "no kernelcache for $DEVICE".
+kc_lists_device() {
+  local list="${1#kernelcache.release.}" dev="$2" tok fam="" out=" "
+  local IFS=_
+  for tok in $list; do
+    case "$tok" in
+      *,*) fam="${tok%%,*}"; out="$out$tok " ;;
+      *)   [ -n "$fam" ] && out="$out$fam,$tok " ;;
+    esac
+  done
+  case "$out" in *" $dev "*) return 0 ;; *) return 1 ;; esac
+}
+
+# process_side appends to these, so clear them once up front rather than
+# accumulating onto a previous run's record.
+rm -f "$WORKDIR/metadata/kernelcache.txt" \
+      "$WORKDIR/metadata/kexts_not_in_device_kernelcache.txt"
+[ -s "$WORKDIR/kexts.txt" ] || \
+  echo "none: no changed kexts" > "$WORKDIR/metadata/kernelcache.txt"
+
 # 3.5-6. Process each side sequentially to minimize disk usage
 # This function extracts and processes one IPSW side at a time
 process_side() {
@@ -388,39 +419,76 @@ process_side() {
   # Extract IPSW
   extract_all "$side" "$ipsw_file"
   
-  # Extract KEXTs from kernelcache if needed
+  # Extract KEXTs from the DEVICE's kernelcache if needed
+  #
+  # A UniversalMac IPSW ships one kernelcache per SoC family (8-14 of them)
+  # plus VirtualMac2,1. Taking whichever `find -print -quit` returns first is
+  # directory-order luck. On this Vault it handed Mac14,12 (Mac mini M2 Pro,
+  # t6020) the Mac16,5_6_7_8_9_11 (M4 Max) kernelcache for 24F74-24G84 and
+  # 25G76-25G83: com.apple.kernel came from the wrong kernel and AGXG14X,
+  # T602X-DCP and the T602x PMGR/CLPC kexts were missing entirely. Three
+  # October pairs were right only because those kernelcaches happened to be
+  # byte-identical to Mac14,12's.
+  #
+  # So pick the kernelcache whose name lists $DEVICE, and refuse to guess when
+  # none does. Ported from wf-at56 2b31d9f; that script does this once over
+  # both sides, this one is already per-side inside process_side, so the
+  # chosen directory is a local rather than an eval'd per-side global.
+  KEXT_SRC=""
   if [ -s "$WORKDIR/kexts.txt" ]; then
-    echo "[*] Extracting KEXTs from kernelcache for $side..."
-    for arch in arm64e x86_64; do
-      KC_DIR="$WORKDIR/extracted_full/$side/$arch"
-      KC=$(find "$KC_DIR" -maxdepth 2 -name 'kernelcache.release.*' -print -quit)
+    echo "[*] Extracting KEXTs from the $DEVICE kernelcache for $side..."
 
-      echo
-      if [ -n "$KC" ]; then
-        OUT_DIR="$KC_DIR/kernelcache_kexts"
-        if [ ! -d "$OUT_DIR" ] || [ -z "$(find "$OUT_DIR" -type f -print -quit)" ]; then
-          echo "  → Extracting KEXTs from $(basename "$KC")..."
-          mkdir -p "$OUT_DIR"
-          ipsw kernel extract "$KC" --all --output "$OUT_DIR"
-        else
-          echo "  → KEXTs already extracted for $side/$arch — skipping."
-        fi
-      else
-        echo "  [ERROR] No kernelcache found for $side/$arch — aborting."
-        exit 1
+    KC=""
+    candidates=""
+    # maxdepth 3 (not 2): this layout nests the cache under
+    # extracted_full/<side>/<arch>/<build>__<device>/.
+    while IFS= read -r f; do
+      candidates="$candidates  $(basename "$f")"$'\n'
+      if [ -z "$KC" ] && kc_lists_device "$(basename "$f")" "$DEVICE"; then
+        KC="$f"
       fi
-    done
+    done < <(find "$WORKDIR/extracted_full/$side" -maxdepth 4 -type f \
+               -name 'kernelcache.release.*' ! -name '._*' | sort)
+
+    echo
+    if [ -z "$KC" ]; then
+      echo "  [ERROR] No kernelcache for $DEVICE on the $side side — aborting." >&2
+      echo "  Candidates found:" >&2
+      printf '%s' "${candidates:-  (none)
+}" >&2
+      exit 1
+    fi
+
+    # Keyed by kernelcache name so a directory filled from a different (wrong)
+    # kernelcache on an earlier run is never mistaken for this one.
+    OUT_DIR="$(dirname "$KC")/kernelcache_kexts.$(basename "$KC")"
+    if [ ! -d "$OUT_DIR" ] || [ -z "$(find "$OUT_DIR" -type f -print -quit)" ]; then
+      echo "  → $side: extracting KEXTs from $(basename "$KC")..."
+      mkdir -p "$OUT_DIR"
+      ipsw kernel extract "$KC" --all --output "$OUT_DIR"
+    else
+      echo "  → $side: KEXTs from $(basename "$KC") already extracted — skipping."
+    fi
+    echo "$side: $(basename "$KC")" >> "$WORKDIR/metadata/kernelcache.txt"
+    KEXT_SRC="$OUT_DIR"
   fi
 
   # Copy changed KEXTs for this side
+  #
+  # kexts.txt comes from a diff that spans EVERY kernelcache in the IPSW, so it
+  # can name kexts this device simply does not have (M1 T8103/G13 drivers on an
+  # M2 Pro, say). Record those rather than dropping them silently, so a real
+  # extraction failure stays distinguishable from a kext the device never had.
   if [ -s "$WORKDIR/kexts.txt" ]; then
     echo "[*] Copying changed KEXTs for $side..."
     while read -r kext; do
       [ -n "$kext" ] || continue
-      src=$(find "$WORKDIR/extracted_full/$side" -type f -path "*/kernelcache_kexts/$kext" -print -quit)
+      src="$KEXT_SRC/$kext"
       if [ -f "$src" ]; then
         mkdir -p "$WORKDIR/changed/$side/kexts/$(dirname "$kext")"
         cp "$src" "$WORKDIR/changed/$side/kexts/$kext"
+      else
+        echo "$side: $kext" >> "$WORKDIR/metadata/kexts_not_in_device_kernelcache.txt"
       fi
     done < "$WORKDIR/kexts.txt"
   fi
@@ -745,8 +813,22 @@ SHORTFALL=0
 for class in kexts dylibs machos; do
   want=$(grep -cve '^[[:space:]]*$' "$WORKDIR/$class.txt" 2>/dev/null || echo 0)
   got=$(find "$WORKDIR/changed" -path "*/$class/*" -type f ! -name "._*" 2>/dev/null | wc -l | tr -d ' ')
+
+  # kexts.txt is derived from a diff spanning EVERY kernelcache in the IPSW,
+  # so on a UniversalMac it names kexts this device does not ship. Those are
+  # recorded by step 4 and are not missing work — counting them as wanted
+  # would fail a complete run. Each absent kext is logged once per side.
+  absent=0
+  if [ "$class" = kexts ] && [ -s "$WORKDIR/metadata/kexts_not_in_device_kernelcache.txt" ]; then
+    absent=$(awk -F': ' '{print $2}' "$WORKDIR/metadata/kexts_not_in_device_kernelcache.txt" \
+             | sort -u | wc -l | tr -d ' ')
+    want=$((want - absent))
+    [ "$want" -lt 0 ] && want=0
+  fi
+
   expect=$((want * 2))
-  printf '%-8s want=%-6s expect=%-6s got=%-6s\n' "$class" "$want" "$expect" "$got" \
+  printf '%-8s want=%-6s expect=%-6s got=%-6s%s\n' "$class" "$want" "$expect" "$got" \
+    "$([ "$absent" -gt 0 ] && echo "  (${absent} not in ${DEVICE} kernelcache)")" \
     | tee -a "$WORKDIR/metadata/extraction_report.txt"
   if [ "$want" -gt 0 ] && [ "$got" -lt "$want" ]; then
     echo "  [SHORTFALL] $class: only $got of >=$want expected files" \
