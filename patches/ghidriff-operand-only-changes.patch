@@ -55,6 +55,41 @@ stub, which also shifts; triage over-reporting, not a miss.
 Applying only hunk 1 still yields 0 — the pair reaches the diff loop and is
 then dropped by gate 2.
 
+DO NOT APPLY TO SHARED-CACHE WORK AS WRITTEN — MEASURED FALSE POSITIVES
+-----------------------------------------------------------------------
+Correct on standalone Mach-Os (the harness control stays 0; a macho keeps
+__TEXT at 0x100000000 across builds, so its bytes are comparable).
+
+It floods on dylibs and kexts pulled from a dyld_shared_cache or kernelcache,
+which are rebased between builds. Measured on iPhone13,3 23G90 -> 23H128 with
+this patch applied (raw numbers in ghidriff-dylib-false-positives.tsv):
+
+  ARKit                           mod=29   of 92 functions
+  ActionButtonSelector            mod=439  of 1448
+
+Both have an IDENTICAL version string in both caches, and ARKit's normalised
+instruction stream is byte-identical (329 vs 329 instructions), so every one
+of those 29 is a false positive — roughly a third of the binary.
+
+Two binaries even report more modified functions than they contain, which is
+impossible for real detections and a clear tell on its own:
+
+  AirPlayMirroringModule          mod=3218 total=346
+  ProactivePredictionFoundation   mod=6723 total=828
+
+Cause: _func_bytes_differ compares RAW bytes, and rebasing rewrites bytes in
+functions whose code did not change. Gate 2 then passes as well, because
+rebasing perturbs the LDR/ADD immediates that make instructions_ratio < 1.0.
+Both hunks fire on the same noise. The comment in hunk 1 claiming
+over-triggering "costs time, never correctness" is wrong for this input: the
+downstream diff does not filter the noise back out.
+
+A usable version has to be rebase-aware — compare a NORMALISED instruction
+stream (addresses, labels and hex literals masked) rather than raw bytes,
+which is what scripts/text-changed.sh does. That also inherits its limit:
+a pure-constant change then becomes invisible, so masking alone cannot be
+the whole answer for cache-resident binaries.
+
 --- a/ghidriff/ghidra_diff_engine.py
 +++ b/ghidriff/ghidra_diff_engine.py
 @@ -1400,6 +1400,12 @@

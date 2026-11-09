@@ -1,0 +1,11 @@
+# Measured on iPhone13,3 23G90 -> 23H128 (OTA security train), patched ghidriff.
+# bucket<TAB>image<TAB>modified_funcs_len<TAB>total_funcs_len
+control	/System/Library/AccessibilityBundles/ARKit.axbundle/ARKit	29	92
+control	/System/Library/PrivateFrameworks/ActionButtonSelector.framework/ActionButtonSelector	439	1448
+version	/System/Library/AccessibilityBundles/AXActionSheetUIServer.axuiservice/AXActionSheetUIServer	50	180
+version	/System/Library/ControlCenter/Bundles/AirPlayMirroringModule.bundle/AirPlayMirroringModule	3218	346
+version	/System/Library/HIDPlugins/IOHIDEventSystemStatistics.plugin/IOHIDEventSystemStatistics	64	364
+version	/System/Library/PrivateFrameworks/AppPredictionUIFoundation.framework/AppPredictionUIFoundation	173	512
+version	/System/Library/PrivateFrameworks/IDSBlastDoorSupport.framework/IDSBlastDoorSupport	337	334
+version	/System/Library/PrivateFrameworks/ProactivePredictionFoundation.framework/ProactivePredictionFoundation	6723	828
+code	/System/Library/AccessibilityBundles/QuickSpeak.bundle/QuickSpeak	440	1174
